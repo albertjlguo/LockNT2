@@ -25,6 +25,16 @@ class StreamManager {
         this.lastScaledPredictions = [];
         this.debug = false; // 控制调试日志开关
         
+        // Hover tooltip state
+        // 悬停提示状态
+        this.hoverTooltip = {
+            active: false,
+            x: 0,
+            y: 0,
+            objectInfo: null,
+            element: null
+        };
+        
         this.initializeElements();
         this.setupEventListeners();
     }
@@ -98,6 +108,14 @@ class StreamManager {
                     this.updateTrackingList();
                 }
             });
+            
+            // Hover to show detection information
+            // 悬停显示检测目标信息
+            this.detectionCanvas.addEventListener('mousemove', (e) => this.onCanvasMouseMove(e));
+            
+            // Clear tooltip when mouse leaves canvas
+            // 鼠标离开画布时清除提示
+            this.detectionCanvas.addEventListener('mouseleave', () => this.hideTooltip());
         }
 
         // Keyboard shortcuts 键盘快捷键
@@ -869,6 +887,137 @@ class StreamManager {
             info: 'info-circle'
         };
         return icons[type] || 'info-circle';
+    }
+    
+    /**
+     * Handle mouse movement on canvas to show object hover tooltip
+     * 处理画布上的鼠标移动以显示目标悬停提示
+     */
+    onCanvasMouseMove(e) {
+        if (!this.isActive || !this.lastScaledPredictions || this.lastScaledPredictions.length === 0) {
+            this.hideTooltip();
+            return;
+        }
+        
+        // Convert mouse position to canvas coordinates
+        // 将鼠标位置转换为画布坐标
+        const rect = this.detectionCanvas.getBoundingClientRect();
+        const scaleX = this.detectionCanvas.width / rect.width;
+        const scaleY = this.detectionCanvas.height / rect.height;
+        const x = (e.clientX - rect.left) * scaleX;
+        const y = (e.clientY - rect.top) * scaleY;
+        
+        // Check if mouse is over any detection
+        // 检查鼠标是否在任何检测目标上方
+        let hoveredObject = null;
+        
+        // First check if over any tracked objects that are not locked (we want hover to prioritize untracked objects)
+        // 首先检查是否在任何未锁定的跟踪对象上方（我们希望悬停优先考虑未追踪的对象）
+        const tracks = this.tracker.getTracks().filter(t => !t.locked);
+        for (const track of tracks) {
+            const b = track.bbox;
+            if (x >= b.x && y >= b.y && x <= b.x + b.w && y <= b.y + b.h) {
+                this.hideTooltip(); // Don't show tooltip for already tracked objects
+                return;
+            }
+        }
+        
+        // Then check raw detections
+        // 然后检查原始检测结果
+        for (const pred of this.lastScaledPredictions) {
+            const [bx, by, bw, bh] = pred.bbox;
+            if (x >= bx && y >= by && x <= bx + bw && y <= by + bh) {
+                hoveredObject = pred;
+                break;
+            }
+        }
+        
+        if (hoveredObject) {
+            // We found an object under the mouse, show tooltip
+            // 找到鼠标下方的对象，显示提示
+            this.showTooltip(e.clientX, e.clientY, hoveredObject);
+        } else {
+            // No object under mouse
+            // 鼠标下方没有对象
+            this.hideTooltip();
+        }
+    }
+    
+    /**
+     * Create and show tooltip with object information
+     * 创建并显示包含对象信息的提示框
+     */
+    showTooltip(clientX, clientY, objectInfo) {
+        // Create tooltip if it doesn't exist
+        // 如果提示框不存在则创建
+        if (!this.hoverTooltip.element) {
+            const tooltip = document.createElement('div');
+            tooltip.className = 'detection-tooltip';
+            document.body.appendChild(tooltip);
+            this.hoverTooltip.element = tooltip;
+        }
+        
+        // Format confidence score
+        // 格式化置信度分数
+        const confidence = (objectInfo.score * 100).toFixed(1);
+        
+        // Update tooltip content
+        // 更新提示框内容
+        this.hoverTooltip.element.innerHTML = `
+            <div class="tooltip-content">
+                <div class="tooltip-class">${this.formatClassName(objectInfo.class)}</div>
+                <div class="tooltip-confidence">${confidence}% 置信度</div>
+                <div class="tooltip-instruction">点击即可追踪 / Click to track</div>
+            </div>
+        `;
+        
+        // Position tooltip near mouse but not under it
+        // 将提示框定位在鼠标附近但不在其下方
+        const tooltipRect = this.hoverTooltip.element.getBoundingClientRect();
+        let left = clientX + 15; // Offset from cursor
+        let top = clientY - tooltipRect.height - 10; // Position above cursor
+        
+        // Keep tooltip within window bounds
+        // 保持提示框在窗口范围内
+        if (left + tooltipRect.width > window.innerWidth) {
+            left = clientX - tooltipRect.width - 10; // Position to left if too far right
+        }
+        if (top < 0) {
+            top = clientY + 20; // Position below cursor if too high
+        }
+        
+        // Update tooltip position
+        // 更新提示框位置
+        this.hoverTooltip.element.style.left = `${left}px`;
+        this.hoverTooltip.element.style.top = `${top}px`;
+        this.hoverTooltip.element.style.display = 'block';
+        
+        // Update hover state
+        // 更新悬停状态
+        this.hoverTooltip.active = true;
+        this.hoverTooltip.objectInfo = objectInfo;
+    }
+    
+    /**
+     * Hide tooltip
+     * 隐藏提示框
+     */
+    hideTooltip() {
+        if (this.hoverTooltip.element) {
+            this.hoverTooltip.element.style.display = 'none';
+        }
+        this.hoverTooltip.active = false;
+        this.hoverTooltip.objectInfo = null;
+    }
+    
+    /**
+     * Format class name for display (borrowed from detection.js)
+     * 格式化类名以便显示（从detection.js借用）
+     */
+    formatClassName(className) {
+        return className.split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
     }
 }
 

@@ -388,3 +388,46 @@ body {
     100% { opacity: 1; }
 }
 
+/* Detection Tooltip Styling */
+.detection-tooltip {
+    position: absolute;
+    z-index: 9999;
+    background-color: rgba(38, 10, 64, 0.85); /* Dark purple with transparency */
+    color: white;
+    border-radius: 8px;
+    padding: 8px 12px;
+    pointer-events: none;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+    font-size: 14px;
+    max-width: 220px;
+    animation: fadeIn 0.2s ease-in-out;
+    border-left: 3px solid var(--purple-primary);
+    backdrop-filter: blur(4px);
+}
+
+.tooltip-content {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.tooltip-class {
+    font-weight: 600;
+    font-size: 16px;
+    color: white;
+}
+
+.tooltip-confidence {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.tooltip-instruction {
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.2);
+    font-size: 12px;
+    color: var(--warning-color);
+    font-style: italic;
+}
+
