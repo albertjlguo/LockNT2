@@ -95,6 +95,7 @@ class StreamManager {
                     this.lastScaledPredictions = [];
                     this.clearOverlay();
                     this.showAlert('Cleared all tracks', 'warning');
+                    this.updateTrackingList();
                 }
             });
         }
@@ -114,12 +115,14 @@ class StreamManager {
                 this.clearOverlay();
                 this.drawTracks();
                 this.showAlert('All tracks unlocked', 'info');
+                this.updateTrackingList();
             } else if (k === 'c' || k === 'C') {
                 // Clear all 清空全部
                 this.tracker.clear();
                 this.lastScaledPredictions = [];
                 this.clearOverlay();
                 this.showAlert('Cleared all tracks', 'warning');
+                this.updateTrackingList();
             } else if (k === 'a' || k === 'A') {
                 // Toggle auto-create 切换自动创建
                 this.tracker.autoCreate = !this.tracker.autoCreate;
@@ -165,6 +168,7 @@ class StreamManager {
             this.currentStream = url;
             this.frameCount = 0;
             if (this.tracker) this.tracker.clear(); // reset tracker on new stream
+            this.updateTrackingList();
             
             // Update button states
             this.updateButtonStates(true);
@@ -215,6 +219,7 @@ class StreamManager {
             if (this.tracker) this.tracker.clear();
             this.lastScaledPredictions = [];
             this.clearOverlay();
+            this.updateTrackingList();
             
             this.showAlert('Stream stopped', 'info');
             
@@ -503,9 +508,8 @@ class StreamManager {
                 this.tracker.update(scaled, this.videoContext);
             }
 
-            // 绘制检测框（内部自行缩放到画布）
-            this.drawDetections(predictions);
-            // 叠加绘制追踪框与轨迹
+            // 仅绘制追踪框（不显示检测框）
+            this.clearOverlay();
             this.drawTracks();
 
             this.lastDetectionTime = now;
@@ -565,7 +569,8 @@ class StreamManager {
         if (!this.detectionContext || !this.tracker) return;
         const ctx = this.detectionContext;
 
-        const tracks = this.tracker.getTracks();
+        // Only draw locked tracks so boxes appear only after user clicks
+        const tracks = this.tracker.getTracks().filter(t => t.locked);
         for (const t of tracks) {
             const b = t.bbox;
             ctx.save();
@@ -585,21 +590,6 @@ class StreamManager {
             ctx.globalAlpha = 1.0;
             ctx.fillText(label, b.x + 5, Math.max(14, b.y - 6));
 
-            // Draw trajectory
-            if (t.trajectory && t.trajectory.length > 1) {
-                ctx.beginPath();
-                ctx.lineWidth = 2;
-                ctx.setLineDash([]);
-                ctx.strokeStyle = t.color;
-                let first = true;
-                for (const p of t.trajectory) {
-                    const px = p.x, py = p.y;
-                    if (first) { ctx.moveTo(px, py); first = false; }
-                    else { ctx.lineTo(px, py); }
-                }
-                ctx.stroke();
-            }
-
             ctx.restore();
         }
     }
@@ -618,7 +608,7 @@ class StreamManager {
      * Handle click on overlay: map to canvas coords and lock a track
      * 处理画布点击：坐标映射并锁定目标
      */
-    onCanvasClick(e) {
+    async onCanvasClick(e) {
         if (!this.detectionCanvas || !this.tracker) return;
         const rect = this.detectionCanvas.getBoundingClientRect();
         const scaleX = this.detectionCanvas.width / rect.width;
@@ -642,15 +632,35 @@ class StreamManager {
             }
             this.clearOverlay();
             this.drawTracks();
+            this.updateTrackingList();
             return;
         }
 
-        const id = this.tracker.lockFromPoint(x, y, this.lastScaledPredictions || [], this.videoContext);
+        let id = this.tracker.lockFromPoint(x, y, this.lastScaledPredictions || [], this.videoContext);
+        if (!id && this.frameImage && window.detectionManager && window.detectionManager.isModelLoaded) {
+            // One-shot detection fallback to ensure immediate lock on click
+            try {
+                const predictions = await window.detectionManager.detectObjects(this.frameImage);
+                const scaleX2 = this.detectionCanvas.width / (this.frameImage?.naturalWidth || this.detectionCanvas.width);
+                const scaleY2 = this.detectionCanvas.height / (this.frameImage?.naturalHeight || this.detectionCanvas.height);
+                const scaled = predictions.map(p => {
+                    const [bx, by, bw, bh] = p.bbox;
+                    return { bbox: [bx * scaleX2, by * scaleY2, bw * scaleX2, bh * scaleY2], score: p.score, class: p.class };
+                });
+                this.lastScaledPredictions = scaled;
+                if (this.tracker && this.videoContext) this.tracker.update(scaled, this.videoContext);
+                id = this.tracker.lockFromPoint(x, y, this.lastScaledPredictions || [], this.videoContext);
+            } catch (err) {
+                console.warn('One-shot detection on click failed:', err);
+            }
+        }
+
         if (id) {
             this.showAlert(`Locked target #${id}`, 'success');
             // 立即绘制最新轨迹
             this.clearOverlay();
             this.drawTracks();
+            this.updateTrackingList();
         }
     }
 
@@ -793,6 +803,7 @@ class StreamManager {
         this.isActive = false;
         this.hideVideoDisplay();
         this.updateButtonStates(false);
+        this.updateTrackingList();
         this.showAlert(message, 'danger');
     }
 
@@ -860,6 +871,34 @@ class StreamManager {
         return icons[type] || 'info-circle';
     }
 }
+
+/**
+ * Update tracking list UI (locked tracks)
+ */
+StreamManager.prototype.updateTrackingList = function () {
+    const container = document.getElementById('trackingList');
+    if (!container || !this.tracker) return;
+    const locked = this.tracker.getTracks().filter(t => t.locked);
+    if (locked.length === 0) {
+        container.innerHTML = `
+            <div class="no-detections text-center py-4">
+                <i class="fas fa-bullseye fa-2x text-muted mb-2"></i>
+                <p class="text-muted mb-0">未选择目标</p>
+                <small class="text-muted">点击画面中的目标以开始跟踪</small>
+            </div>
+        `;
+        return;
+    }
+    const html = locked.map(t => `
+        <div class="object-item fade-in">
+            <div>
+                <div class="object-name">ID ${t.id}</div>
+                <div class="confidence-score">Locked</div>
+            </div>
+        </div>
+    `).join('');
+    container.innerHTML = html;
+};
 
 // Dark mode functionality
 class ThemeManager {
