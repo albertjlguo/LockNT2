@@ -59,8 +59,10 @@ class StreamProcessor:
             cmd = [
                 'yt-dlp',
                 '--get-url',
-                '--format', 'worst[height>=240][height<=480]/best[height<=480]',
+                '--format', 'worst[height>=240][height<=360]/best[height<=360]',
                 '--no-warnings',
+                '--hls-prefer-native',
+                '--hls-use-mpegts',
                 self.youtube_url
             ]
             
@@ -80,38 +82,77 @@ class StreamProcessor:
     
     def start_processing(self):
         """Start processing the video stream."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Get direct stream URL
+                stream_url = self.get_stream_url()
+                if not stream_url:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Failed to get stream URL, attempt {attempt + 1}/{max_retries}")
+                        time.sleep(2)
+                        continue
+                    else:
+                        logging.error("Failed to get stream URL after all attempts")
+                        return
+            
+                # Open video capture with optimized settings
+                self.cap = cv2.VideoCapture(stream_url, cv2.CAP_FFMPEG)
+                
+                if not self.cap.isOpened():
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Failed to open video stream, attempt {attempt + 1}/{max_retries}")
+                        time.sleep(2)
+                        continue
+                    else:
+                        logging.error("Failed to open video stream after all attempts")
+                        return
+            
+                # Optimize for low latency streaming
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.cap.set(cv2.CAP_PROP_FPS, 10)  # Even lower FPS for stability
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+                
+                # Connection successful, break retry loop
+                break
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logging.warning(f"Connection attempt {attempt + 1} failed: {str(e)}. Retrying...")
+                    time.sleep(2)
+                    continue
+                else:
+                    logging.error(f"All connection attempts failed: {str(e)}")
+                    return
+        
         try:
-            # Get direct stream URL
-            stream_url = self.get_stream_url()
-            if not stream_url:
-                logging.error("Failed to get stream URL")
-                return
-            
-            # Open video capture
-            self.cap = cv2.VideoCapture(stream_url)
-            
-            if not self.cap.isOpened():
-                logging.error("Failed to open video stream")
-                return
-            
-            # Set buffer size to reduce latency
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            self.cap.set(cv2.CAP_PROP_FPS, 15)  # Limit to 15 FPS
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             
             self.is_running = True
+            self.failed_attempts = 0
             logging.info("Started video processing")
             
             frame_time_start = time.time()
             
-            while self.is_running:
+            while self.is_running and self.cap is not None:
                 ret, frame = self.cap.read()
                 
                 if not ret:
                     logging.warning("Failed to read frame, attempting to reconnect...")
-                    time.sleep(1)
+                    time.sleep(0.5)
+                    # Try to reconnect after 3 failed attempts
+                    if hasattr(self, 'failed_attempts'):
+                        self.failed_attempts += 1
+                    else:
+                        self.failed_attempts = 1
+                    
+                    if self.failed_attempts > 3:
+                        logging.error("Too many failed attempts, stopping stream")
+                        break
                     continue
+                else:
+                    # Reset failed attempts on successful read
+                    self.failed_attempts = 0
                 
                 # Update frame count and FPS
                 self.frame_count += 1
@@ -135,8 +176,8 @@ class StreamProcessor:
                 with self.lock:
                     self.latest_frame = buffer.tobytes()
                 
-                # Reduced delay for faster processing
-                time.sleep(0.066)  # ~15 FPS - faster processing
+                # Optimized delay for stability
+                time.sleep(0.1)  # ~10 FPS - more stable processing
                 
         except Exception as e:
             logging.error(f"Error in stream processing: {str(e)}")
