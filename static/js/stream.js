@@ -1037,6 +1037,8 @@ StreamManager.prototype.updateTrackingList = function () {
     const container = document.getElementById('trackingList');
     if (!container || !this.tracker) return;
     
+    // Filter tracks that are locked
+    // 筛选已锁定的目标
     const locked = this.tracker.getTracks().filter(t => t.locked);
     
     // Show empty state when no locked targets / 无锁定目标时显示空状态
@@ -1068,12 +1070,6 @@ StreamManager.prototype.updateTrackingList = function () {
                         title="Unlock target / 解锁目标">
                     <i class="fas fa-unlock"></i>
                 </button>
-                <button type="button" 
-                        class="btn btn-outline-danger btn-sm" 
-                        onclick="window.streamManager.removeTarget(${t.id})"
-                        title="Remove target / 移除目标">
-                    <i class="fas fa-trash"></i>
-                </button>
             </div>
         </div>
         `;
@@ -1103,30 +1099,6 @@ StreamManager.prototype.unlockTarget = function(targetId) {
     }
 };
 
-/**
- * Remove a specific target by ID (completely remove from tracker)
- * 移除指定ID的目标（从追踪器中完全移除）
- */
-StreamManager.prototype.removeTarget = function(targetId) {
-    if (!this.tracker) return;
-    
-    // Find the target and remove it / 查找目标并移除
-    const tracks = this.tracker.getTracks();
-    const targetIndex = tracks.findIndex(t => t.id === targetId);
-    
-    if (targetIndex !== -1) {
-        const track = tracks[targetIndex];
-        const className = this.formatClassName(track.class || 'object');
-        // Remove from tracker's internal array / 从追踪器内部数组中移除
-        tracks.splice(targetIndex, 1);
-        this.showAlert(`已移除 ${className} ID ${targetId}`, 'warning');
-        
-        // Update UI immediately / 立即更新界面
-        this.clearOverlay();
-        this.drawTracks();
-        this.updateTrackingList();
-    }
-};
 
 
 // Initialize managers when page loads
