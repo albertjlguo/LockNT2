@@ -92,20 +92,31 @@ python add_cookies_support.py
    - 完成任何必要的登录和验证
    - 打开开发者工具 (F12)
    - 切换到 Application/应用程序 标签
-   - 左侧选择 Storage > Cookies > https://www.youtube.com
+   - 左侧选择 Storage > Cookies，然后查找以下域名：
+     - `https://www.youtube.com`
+     - `.youtube.com`
+     - `youtube.com`
+   - 如果没有找到，尝试刷新页面或访问一个YouTube视频
    - 复制以下重要cookies的值：
      - `VISITOR_INFO1_LIVE`
      - `YSC`
      - `PREF`
      - `CONSENT` (如果有)
+     - `__Secure-3PSID` (如果已登录)
+     - `__Secure-3PAPISID` (如果已登录)
 
 3. **填写cookies.txt文件**
-将cookies按以下格式填入`cookies.txt`：
+将cookies按以下格式填入项目根目录的`cookies.txt`文件：
 ```
 .youtube.com	TRUE	/	TRUE	1234567890	VISITOR_INFO1_LIVE	你的值
 .youtube.com	TRUE	/	TRUE	1234567890	YSC	你的值
 .youtube.com	TRUE	/	TRUE	1234567890	PREF	你的值
 ```
+
+**文件位置**：
+- 将`cookies.txt`放在与`app.py`相同的目录下
+- 完整路径应该是：`/项目根目录/cookies.txt`
+- 系统会自动检测这个文件并应用到yt-dlp命令
 
 **注意事项**：
 - 使用TAB分隔符，不是空格
@@ -118,6 +129,26 @@ python add_cookies_support.py
 - **无cookies时**: 系统记录警告但继续尝试提取（可能失败）
 - **有cookies时**: yt-dlp使用cookies进行认证，绕过机器人验证
 - **自动检测**: 系统自动检测`cookies.txt`文件并应用到所有yt-dlp命令
+
+### 🔒 Cookies安全性和隐私说明
+
+**重要提醒**: 开发者配置的`cookies.txt`文件会让**所有访问你网站的用户**都能绕过YouTube限制。
+
+**工作机制**:
+- Cookies存储在**服务器端**，不是用户浏览器
+- 所有用户的请求都使用**同一套cookies**进行YouTube认证
+- 这相当于所有用户都"借用"了开发者的YouTube身份
+
+**安全考虑**:
+- ✅ **优点**: 用户无需提供自己的cookies，使用简单
+- ⚠️ **风险**: 如果cookies包含登录信息，可能涉及隐私问题
+- 🔄 **限制**: 大量并发请求可能触发YouTube的频率限制
+
+**最佳实践**:
+1. **使用未登录cookies**: 只使用`VISITOR_INFO1_LIVE`、`YSC`等基础cookies
+2. **避免登录cookies**: 不要使用`__Secure-3PSID`等登录相关cookies
+3. **定期更新**: cookies会过期，需要定期更新
+4. **监控使用**: 关注YouTube API调用频率和限制
 
 ## 系统架构
 
@@ -200,6 +231,11 @@ YouTube直播 → yt-dlp(+cookies) → 直播流URL → OpenCV → 视频帧 →
 3. **检查权限**:
    - 确保cookies.txt文件可读
    - 检查文件路径是否正确
+4. **域名问题排查**:
+   - 如果开发者工具中没有显示youtube.com域名
+   - 尝试访问具体的YouTube视频页面
+   - 检查是否有广告拦截器阻止cookies
+   - 在隐私模式下重新获取cookies
 
 ### 问题3: AI检测不工作
 

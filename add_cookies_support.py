@@ -79,12 +79,21 @@ def get_cookies_instructions():
 2. 如果需要，完成登录和验证
 3. 打开开发者工具 (F12)
 4. 切换到 Application/应用程序 标签
-5. 左侧选择 Storage > Cookies > https://www.youtube.com
-6. 复制以下重要cookies的值：
+5. 左侧选择 Storage > Cookies，查找以下域名：
+   - https://www.youtube.com
+   - .youtube.com  
+   - youtube.com
+6. 如果没有找到域名，尝试：
+   - 刷新页面或访问一个YouTube视频
+   - 关闭广告拦截器
+   - 使用隐私模式重新获取
+7. 复制以下重要cookies的值：
    - VISITOR_INFO1_LIVE
    - YSC  
    - PREF
    - CONSENT (如果有)
+   - __Secure-3PSID (如果已登录)
+   - __Secure-3PAPISID (如果已登录)
 
 📝 填写cookies.txt文件：
 
