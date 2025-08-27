@@ -873,12 +873,16 @@ class StreamManager {
 }
 
 /**
- * Update tracking list UI (locked tracks)
+ * Update tracking list UI (locked tracks) with individual control buttons
+ * 更新追踪列表界面（已锁定目标）并添加单独控制按钮
  */
 StreamManager.prototype.updateTrackingList = function () {
     const container = document.getElementById('trackingList');
     if (!container || !this.tracker) return;
+    
     const locked = this.tracker.getTracks().filter(t => t.locked);
+    
+    // Show empty state when no locked targets / 无锁定目标时显示空状态
     if (locked.length === 0) {
         container.innerHTML = `
             <div class="no-detections text-center py-4">
@@ -889,15 +893,76 @@ StreamManager.prototype.updateTrackingList = function () {
         `;
         return;
     }
+    
+    // Generate HTML for each locked target with control buttons
+    // 为每个锁定目标生成带控制按钮的HTML
     const html = locked.map(t => `
-        <div class="object-item fade-in">
-            <div>
+        <div class="object-item fade-in d-flex justify-content-between align-items-center">
+            <div class="flex-grow-1">
                 <div class="object-name">ID ${t.id}</div>
                 <div class="confidence-score">Locked</div>
             </div>
+            <div class="btn-group btn-group-sm" role="group">
+                <button type="button" 
+                        class="btn btn-outline-warning btn-sm" 
+                        onclick="window.streamManager.unlockTarget(${t.id})"
+                        title="Unlock target / 解锁目标">
+                    <i class="fas fa-unlock"></i>
+                </button>
+                <button type="button" 
+                        class="btn btn-outline-danger btn-sm" 
+                        onclick="window.streamManager.removeTarget(${t.id})"
+                        title="Remove target / 移除目标">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
         </div>
     `).join('');
+    
     container.innerHTML = html;
+};
+
+/**
+ * Unlock a specific target by ID (keep track but unlock)
+ * 解锁指定ID的目标（保留追踪但解锁）
+ */
+StreamManager.prototype.unlockTarget = function(targetId) {
+    if (!this.tracker) return;
+    
+    // Find and unlock the target / 查找并解锁目标
+    const track = this.tracker.getTracks().find(t => t.id === targetId);
+    if (track && track.locked) {
+        this.tracker.unlock(targetId);
+        this.showAlert(`Unlocked target #${targetId}`, 'info');
+        
+        // Update UI immediately / 立即更新界面
+        this.clearOverlay();
+        this.drawTracks();
+        this.updateTrackingList();
+    }
+};
+
+/**
+ * Remove a specific target by ID (completely remove from tracker)
+ * 移除指定ID的目标（从追踪器中完全移除）
+ */
+StreamManager.prototype.removeTarget = function(targetId) {
+    if (!this.tracker) return;
+    
+    // Find the target and remove it / 查找目标并移除
+    const tracks = this.tracker.getTracks();
+    const targetIndex = tracks.findIndex(t => t.id === targetId);
+    
+    if (targetIndex !== -1) {
+        // Remove from tracker's internal array / 从追踪器内部数组中移除
+        tracks.splice(targetIndex, 1);
+        this.showAlert(`Removed target #${targetId}`, 'warning');
+        
+        // Update UI immediately / 立即更新界面
+        this.clearOverlay();
+        this.drawTracks();
+        this.updateTrackingList();
+    }
 };
 
 // Dark mode functionality
