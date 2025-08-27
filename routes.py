@@ -18,43 +18,43 @@ def index():
 
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
-    """Start processing a YouTube live stream."""
+    """Start processing a YouTube stream."""
     global stream_processor, processing_thread, is_processing
     
     try:
         data = request.get_json()
-        youtube_url = data.get('url', '').strip()
+        youtube_url = data.get('url')
         
         if not youtube_url:
-            return jsonify({'error': 'YouTube URL is required'}), 400
+            return jsonify({'error': 'No URL provided'}), 400
         
-        # Validate YouTube URL format
-        if 'youtube.com' not in youtube_url and 'youtu.be' not in youtube_url:
-            return jsonify({'error': 'Invalid YouTube URL format'}), 400
+        # Stop any existing stream
+        stop_stream_processing()
         
-        # Stop existing stream if running
-        if is_processing:
-            stop_stream_processing()
-        
-        # Initialize stream processor
+        # Create new stream processor
         stream_processor = StreamProcessor(youtube_url)
         
-        # Validate stream URL
-        if not stream_processor.validate_stream():
-            return jsonify({'error': 'Unable to access the YouTube stream. Please check the URL and ensure it\'s a live stream.'}), 400
+        # In production, skip strict validation to avoid bot detection issues
+        # Just log a warning if validation fails but continue anyway
+        try:
+            if not stream_processor.validate_stream():
+                logging.warning("Stream validation failed, but continuing in production mode")
+        except Exception as validation_error:
+            logging.warning(f"Stream validation error (continuing anyway): {validation_error}")
         
         # Start processing in background thread
-        is_processing = True
         processing_thread = threading.Thread(target=stream_processor.start_processing)
         processing_thread.daemon = True
         processing_thread.start()
         
+        is_processing = True
         logging.info(f"Started processing stream: {youtube_url}")
+        
         return jsonify({'message': 'Stream processing started successfully'})
         
     except Exception as e:
         logging.error(f"Error starting stream: {str(e)}")
-        return jsonify({'error': f'Failed to start stream processing: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to start stream: {str(e)}'}), 500
 
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
