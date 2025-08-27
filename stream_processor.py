@@ -59,11 +59,12 @@ class StreamProcessor:
             cmd = [
                 'yt-dlp',
                 '--get-url',
-                '--format', 'best[height<=720]',
+                '--format', 'worst[height>=240][height<=480]/best[height<=480]',
+                '--no-warnings',
                 self.youtube_url
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
             
             if result.returncode != 0:
                 logging.error(f"yt-dlp error getting URL: {result.stderr}")
@@ -95,6 +96,9 @@ class StreamProcessor:
             
             # Set buffer size to reduce latency
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap.set(cv2.CAP_PROP_FPS, 15)  # Limit to 15 FPS
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             
             self.is_running = True
             logging.info("Started video processing")
@@ -116,23 +120,23 @@ class StreamProcessor:
                     self.fps = self.frame_count / (current_time - self.last_time)
                     frame_time_start = current_time
                 
-                # Resize frame for processing
+                # Resize frame for processing - much smaller for faster processing
                 height, width = frame.shape[:2]
-                if width > 1280:
-                    scale = 1280 / width
+                if width > 640:
+                    scale = 640 / width
                     new_width = int(width * scale)
                     new_height = int(height * scale)
-                    frame = cv2.resize(frame, (new_width, new_height))
+                    frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
                 
-                # Encode frame as JPEG
-                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                # Encode frame as JPEG with lower quality for faster processing
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
                 
                 # Store latest frame
                 with self.lock:
                     self.latest_frame = buffer.tobytes()
                 
-                # Small delay to prevent overwhelming the system
-                time.sleep(0.033)  # ~30 FPS
+                # Reduced delay for faster processing
+                time.sleep(0.066)  # ~15 FPS - faster processing
                 
         except Exception as e:
             logging.error(f"Error in stream processing: {str(e)}")

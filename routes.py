@@ -102,7 +102,7 @@ def video_feed():
             if frame is not None:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            time.sleep(1/30)  # 30 FPS max
+            time.sleep(1/15)  # 15 FPS max - faster processing
     
     return Response(generate_frames(),
                    mimetype='multipart/x-mixed-replace; boundary=frame')

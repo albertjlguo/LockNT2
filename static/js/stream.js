@@ -241,7 +241,7 @@ class StreamManager {
             } catch (error) {
                 console.error('Detection error:', error);
             }
-        }, 100); // 10 FPS detection rate
+        }, 200); // 5 FPS detection rate - much faster
     }
 
     /**
@@ -307,7 +307,7 @@ class StreamManager {
             } catch (error) {
                 console.error('Status monitoring error:', error);
             }
-        }, 1000);
+        }, 2000); // Check every 2 seconds instead of 1
     }
 
     /**
