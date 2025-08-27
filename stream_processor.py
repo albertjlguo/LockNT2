@@ -157,7 +157,7 @@ class StreamProcessor:
             return None
     
     def start_processing(self):
-        """Start processing the video stream."""
+        """Start processing the video stream with enhanced error handling."""
         retry_count = 0
         max_retries = 3
         
@@ -174,30 +174,49 @@ class StreamProcessor:
                     time.sleep(10)
                     continue
                 
-                # Open video capture with retry logic
-                self.cap = cv2.VideoCapture(stream_url)
-                
-                if not self.cap.isOpened():
-                    logging.error("Failed to open video stream")
+                # Open video capture with enhanced error handling
+                try:
+                    self.cap = cv2.VideoCapture(stream_url)
+                    
+                    if not self.cap.isOpened():
+                        logging.error("Failed to open video stream")
+                        retry_count += 1
+                        time.sleep(5)
+                        continue
+                    
+                    # Set buffer size to reduce latency and prevent memory issues
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    # Set reasonable timeouts to prevent hanging
+                    self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 15000)
+                    self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+                    
+                    # Additional OpenCV settings for stability
+                    self.cap.set(cv2.CAP_PROP_FPS, 30)  # Limit FPS
+                    
+                except Exception as cv_error:
+                    logging.error(f"OpenCV VideoCapture error: {str(cv_error)}")
                     retry_count += 1
                     time.sleep(5)
                     continue
-                
-                # Set buffer size to reduce latency
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                # Set timeout for read operations
-                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
-                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
                 
                 self.is_running = True
                 logging.info("Started video processing")
                 
                 frame_time_start = time.time()
                 consecutive_failures = 0
-                max_consecutive_failures = 10
+                max_consecutive_failures = 5  # Reduced for faster recovery
+                frame_timeout = 30  # Maximum seconds to wait for frames
+                last_frame_time = time.time()
                 
                 while self.is_running:
                     try:
+                        # Check for frame timeout
+                        current_time = time.time()
+                        if current_time - last_frame_time > frame_timeout:
+                            logging.error("Frame timeout - no frames received for 30 seconds")
+                            break
+                        
+                        # Use a timeout for frame reading to prevent hanging
                         ret, frame = self.cap.read()
                         
                         if not ret:
@@ -208,52 +227,79 @@ class StreamProcessor:
                                 logging.error("Too many consecutive frame read failures, reconnecting...")
                                 break
                             
-                            time.sleep(0.1)
+                            time.sleep(0.2)
                             continue
                         
-                        # Reset failure counter on successful read
+                        # Reset failure counter and update last frame time
                         consecutive_failures = 0
+                        last_frame_time = current_time
                         
-                        # Validate frame
-                        if frame is None or frame.size == 0:
+                        # Validate frame with better error handling
+                        if frame is None:
+                            logging.warning("Received None frame")
+                            continue
+                            
+                        if frame.size == 0:
                             logging.warning("Received empty frame")
+                            continue
+                        
+                        # Check frame dimensions
+                        if len(frame.shape) != 3 or frame.shape[2] != 3:
+                            logging.warning(f"Invalid frame shape: {frame.shape}")
                             continue
                         
                         # Update frame count and FPS
                         self.frame_count += 1
-                        current_time = time.time()
                         if current_time - frame_time_start >= 1.0:
                             self.fps = self.frame_count / (current_time - self.last_time)
                             frame_time_start = current_time
                         
-                        # Resize frame for processing
-                        height, width = frame.shape[:2]
-                        if width > 1280:
-                            scale = 1280 / width
-                            new_width = int(width * scale)
-                            new_height = int(height * scale)
-                            frame = cv2.resize(frame, (new_width, new_height))
-                        
-                        # Encode frame as JPEG
-                        success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        
-                        if not success:
-                            logging.warning("Failed to encode frame as JPEG")
+                        # Resize frame for processing with error handling
+                        try:
+                            height, width = frame.shape[:2]
+                            if width > 1280:
+                                scale = 1280 / width
+                                new_width = int(width * scale)
+                                new_height = int(height * scale)
+                                frame = cv2.resize(frame, (new_width, new_height))
+                        except Exception as resize_error:
+                            logging.warning(f"Frame resize error: {str(resize_error)}")
                             continue
                         
-                        # Store latest frame
-                        with self.lock:
-                            self.latest_frame = buffer.tobytes()
+                        # Encode frame as JPEG with error handling
+                        try:
+                            success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            
+                            if not success or buffer is None:
+                                logging.warning("Failed to encode frame as JPEG")
+                                continue
+                        except Exception as encode_error:
+                            logging.warning(f"Frame encoding error: {str(encode_error)}")
+                            continue
                         
-                        # Small delay to prevent overwhelming the system
-                        time.sleep(0.016)  # ~60 FPS to match frontend
+                        # Store latest frame safely
+                        try:
+                            with self.lock:
+                                self.latest_frame = buffer.tobytes()
+                        except Exception as store_error:
+                            logging.warning(f"Frame storage error: {str(store_error)}")
+                            continue
                         
-                    except Exception as frame_error:
-                        logging.error(f"Error processing frame: {str(frame_error)}")
+                        # Controlled delay to prevent overwhelming the system
+                        time.sleep(0.033)  # ~30 FPS for stability
+                        
+                    except cv2.error as cv_error:
+                        logging.error(f"OpenCV error processing frame: {str(cv_error)}")
                         consecutive_failures += 1
                         if consecutive_failures >= max_consecutive_failures:
                             break
-                        time.sleep(0.1)
+                        time.sleep(0.2)
+                    except Exception as frame_error:
+                        logging.error(f"Unexpected error processing frame: {str(frame_error)}")
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            break
+                        time.sleep(0.2)
                 
                 # If we exit the frame loop, try to reconnect
                 if self.is_running:
@@ -274,9 +320,13 @@ class StreamProcessor:
                     logging.error("Max retries reached, stopping stream processing")
                     break
             finally:
-                if self.cap:
-                    self.cap.release()
-                    self.cap = None
+                # Safe cleanup
+                try:
+                    if self.cap:
+                        self.cap.release()
+                        self.cap = None
+                except Exception as cleanup_error:
+                    logging.warning(f"Error during VideoCapture cleanup: {str(cleanup_error)}")
         
         self.cleanup()
         logging.info("Stream processing stopped")
@@ -292,8 +342,14 @@ class StreamProcessor:
         self.cleanup()
     
     def cleanup(self):
-        """Clean up resources."""
-        if self.cap:
-            self.cap.release()
-            self.cap = None
+        """Clean up resources safely."""
+        try:
+            if self.cap:
+                self.cap.release()
+                self.cap = None
+        except Exception as e:
+            logging.warning(f"Error during cleanup: {str(e)}")
+        
+        # Reset state
+        self.latest_frame = None
         logging.info("Stream processor cleaned up")

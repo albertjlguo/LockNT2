@@ -72,58 +72,65 @@ class StreamManager {
     }
 
     /**
-     * Start stream processing
+     * Start the video stream with enhanced error handling
      */
     async startStream() {
-        const urlInput = document.getElementById('youtubeUrl');
-        const url = urlInput ? urlInput.value.trim() : '';
-
-        if (!url) {
-            this.showAlert('Please enter a YouTube URL', 'danger');
-            return;
-        }
-
-        try {
-            // Start backend stream processing
-            const response = await fetch('/start_stream', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ url })
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-            
-            const result = await response.json();
-            console.log('Stream started:', result);
-            
-            // Update UI state
-            this.isActive = true;
-            this.currentStream = url;
-            this.frameCount = 0;
-            
-            // Update button states
-            this.updateButtonStates();
-            
-            // Start status monitoring
-            this.startStatusMonitoring();
-            
-            // Setup video display
-            await this.setupVideoDisplay();
-            
-            // Wait a moment for backend to be ready, then start fetching
-            setTimeout(() => {
-                if (this.isActive) {
-                    this.startFrameFetching();
+        const maxRetries = 3;
+        let retryCount = 0;
+        
+        while (retryCount < maxRetries) {
+            try {
+                const urlInput = document.getElementById('youtubeUrl');
+                if (!urlInput || !urlInput.value.trim()) {
+                    throw new Error('Please enter a YouTube URL');
                 }
-            }, 2000);
-            
-        } catch (error) {
-            console.error('Failed to start stream:', error);
-            this.handleStreamError(`Failed to start stream: ${error.message}`);
+                
+                console.log(`Starting stream (attempt ${retryCount + 1}/${maxRetries})...`);
+                
+                const response = await fetch('/start_stream', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        youtube_url: urlInput.value.trim()
+                    }),
+                    timeout: 30000 // 30 second timeout
+                });
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+                
+                const result = await response.json();
+                console.log('Stream started:', result);
+                
+                this.isActive = true;
+                this.frameErrorCount = 0;
+                this.updateUI();
+                
+                // Start frame fetching after a short delay to allow stream to initialize
+                setTimeout(() => {
+                    this.startFrameFetching();
+                }, 2000);
+                
+                return; // Success, exit retry loop
+                
+            } catch (error) {
+                retryCount++;
+                console.error(`Stream start attempt ${retryCount} failed:`, error);
+                
+                if (retryCount >= maxRetries) {
+                    this.showError(`Failed to start stream after ${maxRetries} attempts: ${error.message}`);
+                    return;
+                }
+                
+                // Wait before retrying
+                const retryDelay = 2000 * retryCount; // Increasing delay
+                console.log(`Retrying in ${retryDelay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
         }
     }
 
@@ -287,21 +294,36 @@ class StreamManager {
                 });
             }
             
-            // Schedule next frame fetch immediately to maintain continuous flow
+            // Reset error count on successful frame load
+            this.frameErrorCount = 0;
+            
+            // Schedule next frame fetch with adaptive timing
             if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 16); // ~60 FPS for ultra smooth video
+                const frameDelay = this.calculateFrameDelay();
+                setTimeout(() => this.fetchNextFrame(), frameDelay);
             }
         };
         
         this.frameImage.onerror = (event) => {
-            console.log('Failed to load frame:', event);
+            this.frameErrorCount = (this.frameErrorCount || 0) + 1;
+            console.log(`Failed to load frame (${this.frameErrorCount}):`, event);
             if (this.frameImage && this.frameImage.src) {
                 console.log('Frame URL was:', this.frameImage.src);
             }
             
-            // Continue fetching even after error to maintain video flow
+            // Implement exponential backoff for error recovery
+            let retryDelay = Math.min(500 * Math.pow(1.5, Math.min(this.frameErrorCount, 10)), 5000);
+            
+            // Reset error count after successful frames
+            if (this.frameErrorCount > 20) {
+                console.warn('Too many consecutive frame errors, attempting stream restart...');
+                this.handleStreamRestart();
+                return;
+            }
+            
+            // Continue fetching with adaptive delay
             if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 500);
+                setTimeout(() => this.fetchNextFrame(), retryDelay);
             }
         };
         
