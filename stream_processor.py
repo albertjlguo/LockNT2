@@ -8,6 +8,17 @@ import requests
 from urllib.parse import urlparse, parse_qs
 import os
 
+def is_production_environment():
+    """Detect if running in production environment."""
+    production_indicators = [
+        os.getenv('FLASK_ENV') == 'production',
+        os.getenv('ENVIRONMENT') == 'production', 
+        'locknt2.theiresearch.com' in os.getenv('SERVER_NAME', ''),
+        os.path.exists('/etc/production'),
+        'replit' in os.getcwd().lower()
+    ]
+    return any(production_indicators)
+
 class StreamProcessor:
     def __init__(self, youtube_url):
         self.youtube_url = youtube_url
@@ -65,23 +76,50 @@ class StreamProcessor:
             return True
     
     def get_stream_url(self):
-        """Get the direct stream URL using yt-dlp with bot detection bypass."""
+        """Get the direct stream URL using yt-dlp with environment-specific settings."""
         try:
-            # Check for cookies file
-            cookies_file = "cookies.txt"
+            # Check for cookies file - use updated version in production
+            if is_production_environment():
+                cookies_file = "cookies_updated.txt" if os.path.exists("cookies_updated.txt") else "cookies.txt"
+                logging.info("Production environment - using enhanced extraction")
+            else:
+                cookies_file = "cookies.txt"
+                logging.info("Development environment - using standard extraction")
+            
             use_cookies = os.path.exists(cookies_file)
             
-            # First attempt: Standard extraction with user agent and headers
-            cmd = [
-                'yt-dlp',
-                '--get-url',
-                '--format', 'best[height<=720]',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                '--add-header', 'Accept-Language:en-US,en;q=0.9',
-                '--extractor-retries', '3',
-                '--socket-timeout', '30',
-                '--no-check-certificate',
-            ]
+            # Environment-specific extraction settings
+            if is_production_environment():
+                # Production: Enhanced extraction with anti-bot measures
+                cmd = [
+                    'yt-dlp',
+                    '--get-url',
+                    '--format', 'best[height<=720]',
+                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    '--add-header', 'Accept-Language:en-US,en;q=0.9',
+                    '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    '--add-header', 'Accept-Encoding:gzip, deflate, br',
+                    '--add-header', 'DNT:1',
+                    '--add-header', 'Connection:keep-alive',
+                    '--add-header', 'Upgrade-Insecure-Requests:1',
+                    '--extractor-retries', '8',
+                    '--socket-timeout', '60',
+                    '--no-check-certificate',
+                    '--sleep-interval', '2',
+                    '--max-sleep-interval', '5',
+                ]
+            else:
+                # Development: Simple extraction
+                cmd = [
+                    'yt-dlp',
+                    '--get-url',
+                    '--format', 'best[height<=720]',
+                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    '--add-header', 'Accept-Language:en-US,en;q=0.9',
+                    '--extractor-retries', '3',
+                    '--socket-timeout', '30',
+                    '--no-check-certificate',
+                ]
             
             # Add cookies if available
             if use_cookies:
@@ -109,18 +147,41 @@ class StreamProcessor:
             else:
                 logging.warning(f"First attempt failed with return code {result.returncode}")
             
-            # Fallback attempt: Lower quality with more aggressive settings
-            fallback_cmd = [
-                'yt-dlp',
-                '--get-url',
-                '--format', 'best[height<=480]',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                '--add-header', 'Accept-Language:en-US,en;q=0.9',
-                '--extractor-retries', '5',
-                '--socket-timeout', '60',
-                '--no-check-certificate',
-                '--ignore-errors',
-            ]
+            # Fallback attempt - only in production or if development fails
+            if is_production_environment() or result.returncode != 0:
+                logging.info("Attempting fallback extraction...")
+                
+                if is_production_environment():
+                    # Production fallback: More aggressive settings
+                    fallback_cmd = [
+                        'yt-dlp',
+                        '--get-url',
+                        '--format', 'worst[height>=360]/best[height<=480]',
+                        '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--add-header', 'Accept-Language:en-US,en;q=0.9',
+                        '--add-header', 'Sec-Fetch-Dest:document',
+                        '--add-header', 'Sec-Fetch-Mode:navigate',
+                        '--add-header', 'Sec-Fetch-Site:none',
+                        '--extractor-retries', '10',
+                        '--socket-timeout', '90',
+                        '--no-check-certificate',
+                        '--ignore-errors',
+                        '--sleep-interval', '3',
+                        '--max-sleep-interval', '8',
+                    ]
+                else:
+                    # Development fallback: Simple lower quality
+                    fallback_cmd = [
+                        'yt-dlp',
+                        '--get-url',
+                        '--format', 'best[height<=480]',
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--add-header', 'Accept-Language:en-US,en;q=0.9',
+                        '--extractor-retries', '5',
+                        '--socket-timeout', '60',
+                        '--no-check-certificate',
+                        '--ignore-errors',
+                    ]
             
             # Add cookies to fallback as well
             if use_cookies:
@@ -138,15 +199,47 @@ class StreamProcessor:
             if fallback_result.stderr:
                 logging.warning(f"Fallback yt-dlp stderr: {fallback_result.stderr}")
             
-            if fallback_result.returncode == 0 and fallback_result.stdout.strip():
-                stream_url = fallback_result.stdout.strip()
-                logging.info(f"Fallback extraction successful: {stream_url[:100]}...")
-                return stream_url
-            else:
-                logging.error(f"Both extraction attempts failed. YouTube may be blocking access.")
-                logging.error(f"Consider adding cookies or using a different approach.")
-                
-                return None
+                if fallback_result.returncode == 0 and fallback_result.stdout.strip():
+                    stream_url = fallback_result.stdout.strip()
+                    logging.info(f"Fallback extraction successful: {stream_url[:100]}...")
+                    return stream_url
+                else:
+                    logging.warning(f"Fallback extraction failed with return code {fallback_result.returncode}")
+                    
+                    # Third attempt - only in production
+                    if is_production_environment():
+                        logging.info("Attempting final production extraction method...")
+                        final_cmd = [
+                            'yt-dlp',
+                            '--get-url',
+                            '--format', '(best[height<=360]/worst)[protocol^=http]',
+                            '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            '--extractor-retries', '15',
+                            '--socket-timeout', '120',
+                            '--no-check-certificate',
+                            '--ignore-errors',
+                            '--sleep-interval', '5',
+                            '--max-sleep-interval', '10',
+                            '--no-warnings',
+                        ]
+                        
+                        if use_cookies:
+                            final_cmd.extend(['--cookies', cookies_file])
+                        
+                        final_cmd.append(self.youtube_url)
+                        
+                        try:
+                            final_result = subprocess.run(final_cmd, capture_output=True, text=True, timeout=150)
+                            if final_result.returncode == 0 and final_result.stdout.strip():
+                                stream_url = final_result.stdout.strip()
+                                logging.info(f"Final extraction successful: {stream_url[:100]}...")
+                                return stream_url
+                        except Exception as final_error:
+                            logging.error(f"Final extraction failed: {str(final_error)}")
+            
+            logging.error(f"All extraction attempts failed. YouTube may be blocking access.")
+            logging.error(f"Consider adding cookies or using a different approach.")
+            return None
                 
         except subprocess.TimeoutExpired:
             logging.error("Timeout while extracting stream URL")
