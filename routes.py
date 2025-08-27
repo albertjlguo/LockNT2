@@ -40,8 +40,10 @@ def start_stream():
         stream_processor = StreamProcessor(youtube_url)
         
         # Validate stream URL
-        if not stream_processor.validate_stream():
-            return jsonify({'error': 'Unable to access the YouTube stream. Please check the URL and ensure it\'s a live stream.'}), 400
+        validation_result, error_message = stream_processor.validate_stream()
+        if not validation_result:
+            logging.error(f"Stream validation failed for URL {youtube_url}: {error_message}")
+            return jsonify({'error': f'Unable to access the YouTube stream. Reason: {error_message}'}), 400
         
         # Start processing in background thread
         is_processing = True

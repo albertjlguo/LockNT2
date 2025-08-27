@@ -18,50 +18,46 @@ class StreamProcessor:
         self.fps = 0
         self.last_time = time.time()
         self.lock = threading.Lock()
-        
+
     def validate_stream(self):
         """Validate if the YouTube URL is accessible and is a live stream."""
         try:
             # Use yt-dlp to get stream info
-            cmd = [
-                'yt-dlp',
-                '--dump-json',
-                '--no-download',
-                self.youtube_url
-            ]
+            cmd = ['yt-dlp', '--dump-json', '--no-download', self.youtube_url]
+            if os.path.exists('cookies.txt'):
+                cmd.extend(['--cookies', 'cookies.txt'])
+                logging.info("Using local cookies.txt file for validation.")
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode != 0:
-                logging.error(f"yt-dlp error: {result.stderr}")
-                return False
+                error_output = result.stderr.strip()
+                logging.error(f"yt-dlp error: {error_output}")
+                return False, error_output or "yt-dlp returned a non-zero exit code."
             
             info = json.loads(result.stdout)
             
             # Check if it's a live stream
             is_live = info.get('is_live', False)
             if not is_live:
-                # Try to get direct stream URL anyway for non-live videos
                 logging.warning("URL may not be a live stream, but attempting to process anyway")
             
-            return True
+            return True, "Stream is valid."
             
         except subprocess.TimeoutExpired:
             logging.error("Timeout while validating stream")
-            return False
+            return False, "Timeout while validating stream with yt-dlp."
         except Exception as e:
             logging.error(f"Error validating stream: {str(e)}")
-            return False
+            return False, f"An exception occurred: {str(e)}"
     
     def get_stream_url(self):
         """Get the direct stream URL using yt-dlp."""
         try:
-            cmd = [
-                'yt-dlp',
-                '--get-url',
-                '--format', 'best[height<=720]',
-                self.youtube_url
-            ]
+            cmd = ['yt-dlp', '--get-url', '--format', 'best[height<=720]', self.youtube_url]
+            if os.path.exists('cookies.txt'):
+                cmd.extend(['--cookies', 'cookies.txt'])
+                logging.info("Using local cookies.txt file for getting stream URL.")
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
@@ -83,16 +79,17 @@ class StreamProcessor:
         max_retries = 3
         
         while retry_count < max_retries and self.is_running:
+            stream_url = None  # Reset stream_url
             try:
-                # Get direct stream URL
+                # Get direct stream URL inside the loop for fresh URL on each retry
                 stream_url = self.get_stream_url()
                 if not stream_url:
                     logging.error("Failed to get stream URL")
                     retry_count += 1
                     time.sleep(5)
                     continue
-                
-                # Open video capture with retry logic
+
+                # Open video capture
                 self.cap = cv2.VideoCapture(stream_url)
                 
                 if not self.cap.isOpened():
@@ -211,6 +208,7 @@ class StreamProcessor:
     
     def cleanup(self):
         """Clean up resources."""
+
         if self.cap:
             self.cap.release()
             self.cap = None

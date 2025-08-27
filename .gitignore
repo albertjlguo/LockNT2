@@ -1,0 +1,9 @@
+# Secrets
+cookies.txt
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Replit specific
+.upm/
