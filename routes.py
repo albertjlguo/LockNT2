@@ -94,13 +94,16 @@ def video_feed():
     global stream_processor
     
     if not stream_processor or not is_processing:
+        logging.warning("Video feed requested but no active stream")
         return Response("No active stream", status=404)
     
     frame = stream_processor.get_latest_frame()
     if frame is not None:
         return Response(frame, mimetype='image/jpeg')
     else:
-        return Response("No frame available", status=503)
+        # Log the reason for 503 error to help diagnose the issue
+        logging.error(f"No frame available - Stream URL extraction may have failed. Stream processor status: running={stream_processor.is_running}")
+        return Response("No frame available - stream processing failed", status=503)
 
 def stop_stream_processing():
     """Helper function to stop stream processing."""

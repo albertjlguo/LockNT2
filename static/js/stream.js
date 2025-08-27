@@ -293,15 +293,10 @@ class StreamManager {
             }
         };
         
-        this.frameImage.onerror = (error) => {
-            console.warn('Failed to load frame:', error);
-            console.warn('Frame URL was:', this.frameImage.src);
-            this.frameErrorCount++;
-            
-            if (this.frameErrorCount >= 10) {
-                this.stopDetection();
-                this.handleStreamError('Failed to load video frames');
-                return;
+        this.frameImage.onerror = (event) => {
+            console.log('Failed to load frame:', event);
+            if (this.frameImage && this.frameImage.src) {
+                console.log('Frame URL was:', this.frameImage.src);
             }
             
             // Continue fetching even after error to maintain video flow

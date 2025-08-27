@@ -75,44 +75,68 @@ class StreamProcessor:
                 '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 '--add-header', 'Accept-Language:en-US,en;q=0.9',
                 '--extractor-retries', '3',
-                '--no-check-certificate',
-                self.youtube_url
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
-            
-            if result.returncode == 0:
-                stream_url = result.stdout.strip()
-                logging.info(f"Got stream URL: {stream_url[:100]}...")
-                return stream_url
-            
-            # Second attempt: Try with different approach if first fails
-            logging.warning(f"First attempt failed: {result.stderr}")
-            
-            cmd_fallback = [
-                'yt-dlp',
-                '--get-url',
-                '--format', 'worst[height<=480]',  # Lower quality as fallback
-                '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-                '--extractor-retries', '5',
                 '--socket-timeout', '30',
                 '--no-check-certificate',
-                '--ignore-errors',
+                '--verbose',  # Add verbose logging for production debugging
                 self.youtube_url
             ]
             
-            result = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=60)
+            logging.info(f"Attempting to extract stream URL from: {self.youtube_url}")
+            logging.info(f"yt-dlp command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
             
-            if result.returncode != 0:
-                logging.error(f"yt-dlp error: {result.stderr}")
+            # Log detailed output for debugging
+            if result.stdout:
+                logging.info(f"yt-dlp stdout: {result.stdout}")
+            if result.stderr:
+                logging.warning(f"yt-dlp stderr: {result.stderr}")
+            
+            if result.returncode == 0 and result.stdout.strip():
+                stream_url = result.stdout.strip()
+                logging.info(f"Successfully extracted stream URL: {stream_url[:100]}...")
+                return stream_url
+            else:
+                logging.warning(f"First attempt failed with return code {result.returncode}")
+            
+            # Fallback attempt: Lower quality with more aggressive settings
+            fallback_cmd = [
+                'yt-dlp',
+                '--get-url',
+                '--format', 'best[height<=480]',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--add-header', 'Accept-Language:en-US,en;q=0.9',
+                '--extractor-retries', '5',
+                '--socket-timeout', '60',
+                '--no-check-certificate',
+                '--ignore-errors',
+                '--verbose',
+                self.youtube_url
+            ]
+            
+            logging.info("Attempting fallback extraction with lower quality...")
+            logging.info(f"Fallback yt-dlp command: {' '.join(fallback_cmd)}")
+            fallback_result = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=60)
+            
+            # Log detailed fallback output
+            if fallback_result.stdout:
+                logging.info(f"Fallback yt-dlp stdout: {fallback_result.stdout}")
+            if fallback_result.stderr:
+                logging.warning(f"Fallback yt-dlp stderr: {fallback_result.stderr}")
+            
+            if fallback_result.returncode == 0 and fallback_result.stdout.strip():
+                stream_url = fallback_result.stdout.strip()
+                logging.info(f"Fallback extraction successful: {stream_url[:100]}...")
+                return stream_url
+            else:
+                logging.error(f"Both extraction attempts failed. YouTube may be blocking access.")
+                logging.error(f"Consider adding cookies or using a different approach.")
                 return None
-            
-            stream_url = result.stdout.strip()
-            logging.info(f"Got fallback stream URL: {stream_url[:100]}...")
-            return stream_url
-            
+                
+        except subprocess.TimeoutExpired:
+            logging.error("Timeout while extracting stream URL")
+            return None
         except Exception as e:
-            logging.error(f"Error getting stream URL: {str(e)}")
+            logging.error(f"Error extracting stream URL: {str(e)}")
             return None
     
     def start_processing(self):
