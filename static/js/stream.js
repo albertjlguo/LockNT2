@@ -965,60 +965,11 @@ StreamManager.prototype.removeTarget = function(targetId) {
     }
 };
 
-// Dark mode functionality
-class ThemeManager {
-    constructor() {
-        this.isDarkMode = localStorage.getItem('darkMode') === 'true';
-        this.setupDarkMode();
-        this.setupToggle();
-    }
-
-    setupDarkMode() {
-        if (this.isDarkMode) {
-            document.documentElement.setAttribute('data-theme', 'dark');
-            this.updateToggleButton();
-        }
-    }
-
-    setupToggle() {
-        const toggle = document.getElementById('darkModeToggle');
-        if (toggle) {
-            toggle.addEventListener('click', () => this.toggleDarkMode());
-        }
-    }
-
-    toggleDarkMode() {
-        this.isDarkMode = !this.isDarkMode;
-        localStorage.setItem('darkMode', this.isDarkMode);
-        
-        if (this.isDarkMode) {
-            document.documentElement.setAttribute('data-theme', 'dark');
-        } else {
-            document.documentElement.removeAttribute('data-theme');
-        }
-        
-        this.updateToggleButton();
-    }
-
-    updateToggleButton() {
-        const toggle = document.getElementById('darkModeToggle');
-        if (toggle) {
-            if (this.isDarkMode) {
-                toggle.innerHTML = '<i class="fas fa-sun"></i> Light Mode';
-            } else {
-                toggle.innerHTML = '<i class="fas fa-moon"></i> Dark Mode';
-            }
-        }
-    }
-}
 
 // Initialize managers when page loads
 document.addEventListener('DOMContentLoaded', () => {
     // Initialize stream manager
     window.streamManager = new StreamManager();
-    
-    // Initialize theme manager
-    window.themeManager = new ThemeManager();
     
     console.log('Stream application initialized');
 });
