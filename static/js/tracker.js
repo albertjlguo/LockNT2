@@ -365,6 +365,9 @@
       const id = this.nextId++;
       const t = new Track(id, { x: d.x, y: d.y, w: d.w, h: d.h }, { locked });
       if (feature) t.feature = feature;
+      // Store object class information for display
+      // 存储对象类别信息用于显示
+      t.class = d.class || 'object';
       this.tracks.push(t);
       return id;
     }
@@ -404,7 +407,7 @@
 
       // Otherwise create a new locked track
       const feature = (this.enableReID && ctx) ? this.encoder.extract(ctx, chosen.box) : null;
-      return this._createTrackFromDet({ ...chosen.box }, feature, true);
+      return this._createTrackFromDet({ ...chosen.box, class: chosen.d.class || 'object' }, feature, true);
     }
 
     /** Unlock and optionally remove a track */

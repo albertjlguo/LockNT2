@@ -104,7 +104,7 @@ class StreamManager {
                     this.tracker.clear();
                     this.lastScaledPredictions = [];
                     this.clearOverlay();
-                    this.showAlert('Cleared all tracks', 'warning');
+                    this.showAlert('已清空所有目标', 'warning');
                     this.updateTrackingList();
                 }
             });
@@ -132,14 +132,14 @@ class StreamManager {
                 for (const t of this.tracker.getTracks()) this.tracker.unlock(t.id);
                 this.clearOverlay();
                 this.drawTracks();
-                this.showAlert('All tracks unlocked', 'info');
+                this.showAlert('已解锁所有目标', 'info');
                 this.updateTrackingList();
             } else if (k === 'c' || k === 'C') {
                 // Clear all 清空全部
                 this.tracker.clear();
                 this.lastScaledPredictions = [];
                 this.clearOverlay();
-                this.showAlert('Cleared all tracks', 'warning');
+                this.showAlert('已清空所有目标', 'warning');
                 this.updateTrackingList();
             } else if (k === 'a' || k === 'A') {
                 // Toggle auto-create 切换自动创建
@@ -581,13 +581,14 @@ class StreamManager {
 
     /**
      * Draw tracks (IDs, boxes, and trajectories)
-     * 绘制追踪框与轨迹（ID/锁定状态）
+     * 绘制追踪框与轨迹（显示类别+ID）
      */
     drawTracks() {
         if (!this.detectionContext || !this.tracker) return;
         const ctx = this.detectionContext;
 
         // Only draw locked tracks so boxes appear only after user clicks
+        // 仅绘制已锁定的追踪目标，点击后才显示框
         const tracks = this.tracker.getTracks().filter(t => t.locked);
         for (const t of tracks) {
             const b = t.bbox;
@@ -597,8 +598,10 @@ class StreamManager {
             ctx.setLineDash(t.locked ? [6, 4] : []);
             ctx.strokeRect(b.x, b.y, b.w, b.h);
 
-            // Draw ID label
-            const label = `ID ${t.id}${t.locked ? ' • LOCK' : ''}`;
+            // Draw class + ID label (no "Lock" text)
+            // 绘制类别+ID标签（不显示"Lock"文字）
+            const className = this.formatClassName(t.class || 'object');
+            const label = `${className} ID ${t.id}`;
             ctx.font = '14px Arial';
             const tw = ctx.measureText(label).width;
             ctx.fillStyle = t.color;
@@ -640,13 +643,14 @@ class StreamManager {
             const b = t.bbox; return x >= b.x && y >= b.y && x <= b.x + b.w && y <= b.y + b.h;
         });
         if (hit) {
+            const className = this.formatClassName(hit.class || 'object');
             if (hit.locked) {
                 this.tracker.unlock(hit.id);
-                this.showAlert(`Unlocked target #${hit.id}`, 'info');
+                this.showAlert(`已解锁 ${className} ID ${hit.id}`, 'info');
             } else {
                 hit.locked = true;
                 hit.lostFrames = 0;
-                this.showAlert(`Locked target #${hit.id}`, 'success');
+                this.showAlert(`已锁定 ${className} ID ${hit.id}`, 'success');
             }
             this.clearOverlay();
             this.drawTracks();
@@ -674,7 +678,11 @@ class StreamManager {
         }
 
         if (id) {
-            this.showAlert(`Locked target #${id}`, 'success');
+            // Get the track to show its class in the alert
+            // 获取追踪目标以在提示中显示其类别
+            const track = this.tracker.getTracks().find(t => t.id === id);
+            const className = this.formatClassName(track?.class || 'object');
+            this.showAlert(`已锁定 ${className} ID ${id}`, 'success');
             // 立即绘制最新轨迹
             this.clearOverlay();
             this.drawTracks();
@@ -1044,12 +1052,14 @@ StreamManager.prototype.updateTrackingList = function () {
     }
     
     // Generate HTML for each locked target with control buttons
-    // 为每个锁定目标生成带控制按钮的HTML
-    const html = locked.map(t => `
+    // 为每个锁定目标生成带控制按钮的HTML，显示具体类别
+    const html = locked.map(t => {
+        const className = this.formatClassName(t.class || 'object');
+        return `
         <div class="object-item fade-in d-flex justify-content-between align-items-center">
             <div class="flex-grow-1">
-                <div class="object-name">ID ${t.id}</div>
-                <div class="confidence-score">Locked</div>
+                <div class="object-name">${className} ID ${t.id}</div>
+                <div class="confidence-score">正在追踪</div>
             </div>
             <div class="btn-group btn-group-sm" role="group">
                 <button type="button" 
@@ -1066,7 +1076,8 @@ StreamManager.prototype.updateTrackingList = function () {
                 </button>
             </div>
         </div>
-    `).join('');
+        `;
+    }).join('');
     
     container.innerHTML = html;
 };
@@ -1081,8 +1092,9 @@ StreamManager.prototype.unlockTarget = function(targetId) {
     // Find and unlock the target / 查找并解锁目标
     const track = this.tracker.getTracks().find(t => t.id === targetId);
     if (track && track.locked) {
+        const className = this.formatClassName(track.class || 'object');
         this.tracker.unlock(targetId);
-        this.showAlert(`Unlocked target #${targetId}`, 'info');
+        this.showAlert(`已解锁 ${className} ID ${targetId}`, 'info');
         
         // Update UI immediately / 立即更新界面
         this.clearOverlay();
@@ -1103,9 +1115,11 @@ StreamManager.prototype.removeTarget = function(targetId) {
     const targetIndex = tracks.findIndex(t => t.id === targetId);
     
     if (targetIndex !== -1) {
+        const track = tracks[targetIndex];
+        const className = this.formatClassName(track.class || 'object');
         // Remove from tracker's internal array / 从追踪器内部数组中移除
         tracks.splice(targetIndex, 1);
-        this.showAlert(`Removed target #${targetId}`, 'warning');
+        this.showAlert(`已移除 ${className} ID ${targetId}`, 'warning');
         
         // Update UI immediately / 立即更新界面
         this.clearOverlay();
