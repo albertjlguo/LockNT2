@@ -90,22 +90,17 @@ def stream_status():
 
 @app.route('/video_feed')
 def video_feed():
-    """Stream video frames for display."""
+    """Get current video frame as JPEG image."""
     global stream_processor
     
     if not stream_processor or not is_processing:
         return Response("No active stream", status=404)
     
-    def generate_frames():
-        while is_processing and stream_processor:
-            frame = stream_processor.get_latest_frame()
-            if frame is not None:
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            time.sleep(1/30)  # 30 FPS max
-    
-    return Response(generate_frames(),
-                   mimetype='multipart/x-mixed-replace; boundary=frame')
+    frame = stream_processor.get_latest_frame()
+    if frame is not None:
+        return Response(frame, mimetype='image/jpeg')
+    else:
+        return Response("No frame available", status=503)
 
 def stop_stream_processing():
     """Helper function to stop stream processing."""

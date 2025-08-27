@@ -12,7 +12,7 @@ class StreamProcessor:
     def __init__(self, youtube_url):
         self.youtube_url = youtube_url
         self.cap = None
-        self.is_running = False
+        self.is_running = True  # Set to True initially
         self.latest_frame = None
         self.frame_count = 0
         self.fps = 0
@@ -79,65 +79,125 @@ class StreamProcessor:
     
     def start_processing(self):
         """Start processing the video stream."""
-        try:
-            # Get direct stream URL
-            stream_url = self.get_stream_url()
-            if not stream_url:
-                logging.error("Failed to get stream URL")
-                return
-            
-            # Open video capture
-            self.cap = cv2.VideoCapture(stream_url)
-            
-            if not self.cap.isOpened():
-                logging.error("Failed to open video stream")
-                return
-            
-            # Set buffer size to reduce latency
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
-            self.is_running = True
-            logging.info("Started video processing")
-            
-            frame_time_start = time.time()
-            
-            while self.is_running:
-                ret, frame = self.cap.read()
-                
-                if not ret:
-                    logging.warning("Failed to read frame, attempting to reconnect...")
-                    time.sleep(1)
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries and self.is_running:
+            try:
+                # Get direct stream URL
+                stream_url = self.get_stream_url()
+                if not stream_url:
+                    logging.error("Failed to get stream URL")
+                    retry_count += 1
+                    time.sleep(5)
                     continue
                 
-                # Update frame count and FPS
-                self.frame_count += 1
-                current_time = time.time()
-                if current_time - frame_time_start >= 1.0:
-                    self.fps = self.frame_count / (current_time - self.last_time)
-                    frame_time_start = current_time
+                # Open video capture with retry logic
+                self.cap = cv2.VideoCapture(stream_url)
                 
-                # Resize frame for processing
-                height, width = frame.shape[:2]
-                if width > 1280:
-                    scale = 1280 / width
-                    new_width = int(width * scale)
-                    new_height = int(height * scale)
-                    frame = cv2.resize(frame, (new_width, new_height))
+                if not self.cap.isOpened():
+                    logging.error("Failed to open video stream")
+                    retry_count += 1
+                    time.sleep(5)
+                    continue
                 
-                # Encode frame as JPEG
-                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                # Set buffer size to reduce latency
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                # Set timeout for read operations
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
                 
-                # Store latest frame
-                with self.lock:
-                    self.latest_frame = buffer.tobytes()
+                self.is_running = True
+                logging.info("Started video processing")
                 
-                # Small delay to prevent overwhelming the system
-                time.sleep(0.033)  # ~30 FPS
+                frame_time_start = time.time()
+                consecutive_failures = 0
+                max_consecutive_failures = 10
                 
-        except Exception as e:
-            logging.error(f"Error in stream processing: {str(e)}")
-        finally:
-            self.cleanup()
+                while self.is_running:
+                    try:
+                        ret, frame = self.cap.read()
+                        
+                        if not ret:
+                            consecutive_failures += 1
+                            logging.warning(f"Failed to read frame ({consecutive_failures}/{max_consecutive_failures})")
+                            
+                            if consecutive_failures >= max_consecutive_failures:
+                                logging.error("Too many consecutive frame read failures, reconnecting...")
+                                break
+                            
+                            time.sleep(0.1)
+                            continue
+                        
+                        # Reset failure counter on successful read
+                        consecutive_failures = 0
+                        
+                        # Validate frame
+                        if frame is None or frame.size == 0:
+                            logging.warning("Received empty frame")
+                            continue
+                        
+                        # Update frame count and FPS
+                        self.frame_count += 1
+                        current_time = time.time()
+                        if current_time - frame_time_start >= 1.0:
+                            self.fps = self.frame_count / (current_time - self.last_time)
+                            frame_time_start = current_time
+                        
+                        # Resize frame for processing
+                        height, width = frame.shape[:2]
+                        if width > 1280:
+                            scale = 1280 / width
+                            new_width = int(width * scale)
+                            new_height = int(height * scale)
+                            frame = cv2.resize(frame, (new_width, new_height))
+                        
+                        # Encode frame as JPEG
+                        success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        
+                        if not success:
+                            logging.warning("Failed to encode frame as JPEG")
+                            continue
+                        
+                        # Store latest frame
+                        with self.lock:
+                            self.latest_frame = buffer.tobytes()
+                        
+                        # Small delay to prevent overwhelming the system
+                        time.sleep(0.033)  # ~30 FPS
+                        
+                    except Exception as frame_error:
+                        logging.error(f"Error processing frame: {str(frame_error)}")
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            break
+                        time.sleep(0.1)
+                
+                # If we exit the frame loop, try to reconnect
+                if self.is_running:
+                    logging.info("Attempting to reconnect to stream...")
+                    self.cleanup()
+                    retry_count += 1
+                    time.sleep(5)
+                else:
+                    break
+                    
+            except Exception as e:
+                logging.error(f"Error in stream processing: {str(e)}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    logging.info(f"Retrying stream processing ({retry_count}/{max_retries})...")
+                    time.sleep(5)
+                else:
+                    logging.error("Max retries reached, stopping stream processing")
+                    break
+            finally:
+                if self.cap:
+                    self.cap.release()
+                    self.cap = None
+        
+        self.cleanup()
+        logging.info("Stream processing stopped")
     
     def get_latest_frame(self):
         """Get the latest processed frame."""

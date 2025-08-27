@@ -16,7 +16,7 @@ class StreamManager {
         this.initializeElements();
         this.setupEventListeners();
     }
-
+    
     /**
      * Initialize canvas elements and contexts
      */
@@ -24,12 +24,23 @@ class StreamManager {
         this.videoCanvas = document.getElementById('videoCanvas');
         this.detectionCanvas = document.getElementById('detectionCanvas');
         
+        console.log('Canvas elements found:', {
+            videoCanvas: !!this.videoCanvas,
+            detectionCanvas: !!this.detectionCanvas
+        });
+        
         if (this.videoCanvas) {
             this.videoContext = this.videoCanvas.getContext('2d');
+            console.log('Video context initialized:', !!this.videoContext);
+        } else {
+            console.error('Video canvas not found!');
         }
         
         if (this.detectionCanvas) {
             this.detectionContext = this.detectionCanvas.getContext('2d');
+            console.log('Detection context initialized:', !!this.detectionContext);
+        } else {
+            console.error('Detection canvas not found!');
         }
     }
 
@@ -72,50 +83,47 @@ class StreamManager {
             return;
         }
 
-        if (!this.validateYouTubeUrl(url)) {
-            this.showAlert('Please enter a valid YouTube URL', 'danger');
-            return;
-        }
-
-        // Check if model is loaded
-        if (!window.detectionManager || !window.detectionManager.isModelLoaded) {
-            this.showAlert('AI model is still loading. Please wait...', 'info');
-            return;
-        }
-
         try {
-            this.showLoading(true);
-            this.updateButtonStates(true);
-
-            // Send request to start stream
+            // Start backend stream processing
             const response = await fetch('/start_stream', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
+                    'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ url: url })
+                body: JSON.stringify({ url })
             });
-
-            const result = await response.json();
-
+            
             if (!response.ok) {
-                throw new Error(result.error || 'Failed to start stream');
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
-
-            // Start video processing
-            await this.initializeVideoDisplay();
-            this.startDetection();
+            
+            const result = await response.json();
+            console.log('Stream started:', result);
+            
+            // Update UI state
+            this.isActive = true;
+            this.currentStream = url;
+            this.frameCount = 0;
+            
+            // Update button states
+            this.updateButtonStates();
+            
+            // Start status monitoring
             this.startStatusMonitoring();
             
-            this.isActive = true;
-            this.showAlert('Stream started successfully!', 'success');
+            // Setup video display
+            await this.setupVideoDisplay();
+            
+            // Wait a moment for backend to be ready, then start fetching
+            setTimeout(() => {
+                if (this.isActive) {
+                    this.startFrameFetching();
+                }
+            }, 2000);
             
         } catch (error) {
-            console.error('Error starting stream:', error);
-            this.showAlert(error.message, 'danger');
-            this.updateButtonStates(false);
-        } finally {
-            this.showLoading(false);
+            console.error('Failed to start stream:', error);
+            this.handleStreamError(`Failed to start stream: ${error.message}`);
         }
     }
 
@@ -155,7 +163,7 @@ class StreamManager {
     /**
      * Initialize video display
      */
-    async initializeVideoDisplay() {
+    async setupVideoDisplay() {
         const placeholder = document.getElementById('videoPlaceholder');
         const streamStatus = document.getElementById('streamStatus');
         
@@ -165,37 +173,21 @@ class StreamManager {
         if (this.detectionCanvas) this.detectionCanvas.classList.remove('d-none');
         if (streamStatus) streamStatus.classList.remove('d-none');
 
-        // Create video element for processing
-        this.videoElement = document.createElement('video');
-        this.videoElement.crossOrigin = 'anonymous';
-        this.videoElement.muted = true;
-        this.videoElement.autoplay = true;
-        this.videoElement.style.display = 'none';
-        document.body.appendChild(this.videoElement);
-
-        // Set video source to our stream endpoint
-        this.videoElement.src = '/video_feed';
+        // Initialize canvas with default size
+        this.setupCanvases(800, 450); // 16:9 aspect ratio default
         
-        // Wait for video to load
-        return new Promise((resolve) => {
-            this.videoElement.addEventListener('loadedmetadata', () => {
-                this.setupCanvases();
-                resolve();
-            });
-        });
+        return Promise.resolve();
     }
 
     /**
      * Setup canvas dimensions
      */
-    setupCanvases() {
-        if (!this.videoElement || !this.videoCanvas || !this.detectionCanvas) return;
+    setupCanvases(defaultWidth = 800, defaultHeight = 450) {
+        if (!this.videoCanvas || !this.detectionCanvas) return;
 
         const containerWidth = this.videoCanvas.parentElement.offsetWidth;
-        const videoAspectRatio = this.videoElement.videoWidth / this.videoElement.videoHeight;
-        
-        const canvasWidth = Math.min(containerWidth, 800);
-        const canvasHeight = canvasWidth / videoAspectRatio;
+        const canvasWidth = Math.min(containerWidth, defaultWidth);
+        const canvasHeight = (canvasWidth / defaultWidth) * defaultHeight;
 
         // Set canvas dimensions
         this.videoCanvas.width = canvasWidth;
@@ -211,6 +203,144 @@ class StreamManager {
     }
 
     /**
+     * Start frame fetching from backend
+     */
+    startFrameFetching() {
+        console.log('Starting frame fetching...');
+        
+        this.frameImage = new Image();
+        this.frameImage.crossOrigin = 'anonymous';
+        this.frameLoadCount = 0;
+        this.frameErrorCount = 0;
+        
+        this.frameImage.onload = () => {
+            console.log('Frame loaded:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
+            
+            // Validate canvas context exists
+            if (!this.videoContext) {
+                console.error('Video context not available!');
+                return;
+            }
+            
+            // Validate frame dimensions
+            if (this.frameImage.naturalWidth === 0 || this.frameImage.naturalHeight === 0) {
+                console.warn('Invalid frame dimensions:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
+                this.frameErrorCount++;
+                if (this.frameErrorCount >= 10) {
+                    this.stopDetection();
+                    this.handleStreamError('Invalid frame dimensions');
+                    return;
+                }
+                setTimeout(() => this.fetchNextFrame(), 100);
+                return;
+            }
+            
+            // Reset error count on successful load
+            this.frameErrorCount = 0;
+            
+            // Update canvas size if needed
+            const canvasWidth = this.videoCanvas.width;
+            const canvasHeight = this.videoCanvas.height;
+            
+            if (canvasWidth !== this.frameImage.naturalWidth || canvasHeight !== this.frameImage.naturalHeight) {
+                console.log('Updating canvas size to:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
+                this.setupCanvases(this.frameImage.naturalWidth, this.frameImage.naturalHeight);
+            }
+            
+            // Clear canvas before drawing
+            this.videoContext.clearRect(0, 0, this.videoCanvas.width, this.videoCanvas.height);
+            
+            // Draw frame to canvas
+            try {
+                this.videoContext.drawImage(this.frameImage, 0, 0, this.videoCanvas.width, this.videoCanvas.height);
+                console.log('Frame drawn to canvas successfully');
+            } catch (error) {
+                console.error('Error drawing frame to canvas:', error);
+                return;
+            }
+            
+            // Update frame counter
+            this.frameCount++;
+            
+            // Trigger AI detection if enabled
+            if (this.isActive && window.detectionManager && window.detectionManager.isModelLoaded()) {
+                this.performDetection();
+            }
+            
+            // Schedule next frame fetch
+            if (this.isActive) {
+                setTimeout(() => this.fetchNextFrame(), 33); // ~30 FPS
+            }
+        };
+        
+        this.frameImage.onerror = (error) => {
+            console.warn('Failed to load frame:', error);
+            console.warn('Frame URL was:', this.frameImage.src);
+            this.frameErrorCount++;
+            
+            if (this.frameErrorCount >= 10) {
+                this.stopDetection();
+                this.handleStreamError('Failed to load video frames');
+                return;
+            }
+            
+            if (this.isActive) {
+                setTimeout(() => this.fetchNextFrame(), 1000);
+            }
+        };
+        
+        // Start fetching frames
+        this.fetchNextFrame();
+    }
+    
+    /**
+     * Fetch next frame from backend
+     */
+    fetchNextFrame() {
+        if (!this.isActive) return;
+        
+        const timestamp = Date.now();
+        const frameUrl = `/video_feed?t=${timestamp}`;
+        console.log('Fetching frame from:', frameUrl);
+        this.frameImage.src = frameUrl;
+    }
+
+    /**
+     * Validate if current frame is ready for detection
+     */
+    isFrameValid() {
+        if (!this.frameImage) {
+            return false;
+        }
+        
+        // Check if image is loaded and has valid dimensions
+        if (this.frameImage.complete && 
+            this.frameImage.naturalWidth > 0 && 
+            this.frameImage.naturalHeight > 0) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Update canvas size based on actual frame dimensions
+     */
+    updateCanvasSize(frameWidth, frameHeight) {
+        if (!frameWidth || !frameHeight) return;
+        
+        const containerWidth = this.videoCanvas.parentElement.offsetWidth;
+        const aspectRatio = frameWidth / frameHeight;
+        
+        const canvasWidth = Math.min(containerWidth, 800);
+        const canvasHeight = canvasWidth / aspectRatio;
+
+        if (this.videoCanvas.width !== canvasWidth || this.videoCanvas.height !== canvasHeight) {
+            this.setupCanvases(canvasWidth, canvasHeight);
+        }
+    }
+
+    /**
      * Start object detection processing
      */
     startDetection() {
@@ -218,30 +348,38 @@ class StreamManager {
             clearInterval(this.detectionInterval);
         }
 
+        this.detectionErrorCount = 0;
+        
         this.detectionInterval = setInterval(async () => {
-            if (!this.isActive || !this.videoElement || !window.detectionManager) return;
+            if (!this.isActive || !this.frameImage || !window.detectionManager) return;
+
+            // Validate frame before detection
+            if (!this.isFrameValid()) {
+                return; // Skip this detection cycle
+            }
 
             try {
-                // Draw current video frame to canvas
-                if (this.videoContext && this.videoElement.videoWidth > 0) {
-                    this.videoContext.drawImage(
-                        this.videoElement, 
-                        0, 0, 
-                        this.videoCanvas.width, 
-                        this.videoCanvas.height
-                    );
-                }
-
-                // Perform object detection
-                const predictions = await window.detectionManager.detectObjects(this.videoElement);
+                // Perform object detection on the current frame
+                const predictions = await window.detectionManager.detectObjects(this.frameImage);
                 
                 // Draw detection results
                 this.drawDetections(predictions);
                 
+                // Reset error count on successful detection
+                this.detectionErrorCount = 0;
+                
             } catch (error) {
-                console.error('Detection error:', error);
+                this.detectionErrorCount++;
+                console.error(`Detection error (${this.detectionErrorCount}):`, error.message);
+                
+                // Stop detection if too many errors
+                if (this.detectionErrorCount >= 5) {
+                    console.error('Too many detection errors, stopping detection');
+                    this.stopDetection();
+                    this.showAlert('AI detection stopped due to repeated errors', 'warning');
+                }
             }
-        }, 100); // 10 FPS detection rate
+        }, 200); // 5 FPS detection rate (less frequent than frame updates)
     }
 
     /**
@@ -257,9 +395,9 @@ class StreamManager {
             const [x, y, width, height] = prediction.bbox;
             const confidence = (prediction.score * 100).toFixed(1);
             
-            // Scale coordinates to canvas size
-            const scaleX = this.detectionCanvas.width / this.videoElement.videoWidth;
-            const scaleY = this.detectionCanvas.height / this.videoElement.videoHeight;
+            // Scale coordinates to canvas size (assuming detection was done on the displayed image)
+            const scaleX = this.detectionCanvas.width / (this.frameImage?.naturalWidth || this.detectionCanvas.width);
+            const scaleY = this.detectionCanvas.height / (this.frameImage?.naturalHeight || this.detectionCanvas.height);
             
             const scaledX = x * scaleX;
             const scaledY = y * scaleY;
@@ -334,6 +472,15 @@ class StreamManager {
             clearInterval(this.detectionInterval);
             this.detectionInterval = null;
         }
+        
+        if (this.frameInterval) {
+            clearInterval(this.frameInterval);
+            this.frameInterval = null;
+        }
+        
+        // Reset error counters
+        this.detectionErrorCount = 0;
+        this.frameErrorCount = 0;
     }
 
     /**
@@ -358,10 +505,10 @@ class StreamManager {
         if (this.detectionCanvas) this.detectionCanvas.classList.add('d-none');
         if (streamStatus) streamStatus.classList.add('d-none');
 
-        // Remove video element
-        if (this.videoElement) {
-            this.videoElement.remove();
-            this.videoElement = null;
+        // Clean up frame image
+        if (this.frameImage) {
+            this.frameImage.src = '';
+            this.frameImage = null;
         }
     }
 
