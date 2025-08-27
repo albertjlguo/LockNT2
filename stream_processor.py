@@ -67,6 +67,10 @@ class StreamProcessor:
     def get_stream_url(self):
         """Get the direct stream URL using yt-dlp with bot detection bypass."""
         try:
+            # Check for cookies file
+            cookies_file = "cookies.txt"
+            use_cookies = os.path.exists(cookies_file)
+            
             # First attempt: Standard extraction with user agent and headers
             cmd = [
                 'yt-dlp',
@@ -78,8 +82,16 @@ class StreamProcessor:
                 '--socket-timeout', '30',
                 '--no-check-certificate',
                 '--verbose',  # Add verbose logging for production debugging
-                self.youtube_url
             ]
+            
+            # Add cookies if available
+            if use_cookies:
+                cmd.extend(['--cookies', cookies_file])
+                logging.info(f"Using cookies file: {cookies_file}")
+            else:
+                logging.warning("No cookies file found - YouTube may block access")
+            
+            cmd.append(self.youtube_url)
             
             logging.info(f"Attempting to extract stream URL from: {self.youtube_url}")
             logging.info(f"yt-dlp command: {' '.join(cmd)}")
@@ -110,8 +122,13 @@ class StreamProcessor:
                 '--no-check-certificate',
                 '--ignore-errors',
                 '--verbose',
-                self.youtube_url
             ]
+            
+            # Add cookies to fallback as well
+            if use_cookies:
+                fallback_cmd.extend(['--cookies', cookies_file])
+                
+            fallback_cmd.append(self.youtube_url)
             
             logging.info("Attempting fallback extraction with lower quality...")
             logging.info(f"Fallback yt-dlp command: {' '.join(fallback_cmd)}")
@@ -146,12 +163,15 @@ class StreamProcessor:
         
         while retry_count < max_retries and self.is_running:
             try:
+                logging.info(f"Attempt {retry_count + 1}/{max_retries}: Getting stream URL...")
                 # Get direct stream URL
                 stream_url = self.get_stream_url()
                 if not stream_url:
-                    logging.error("Failed to get stream URL")
+                    logging.error(f"CRITICAL: Failed to get stream URL, retry {retry_count + 1}/{max_retries}")
+                    logging.error(f"This means yt-dlp could not extract the YouTube stream URL")
+                    logging.error(f"YouTube URL: {self.youtube_url}")
                     retry_count += 1
-                    time.sleep(5)
+                    time.sleep(10)
                     continue
                 
                 # Open video capture with retry logic

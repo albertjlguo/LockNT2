@@ -1,0 +1,16 @@
+# Netscape HTTP Cookie File
+# This is a generated file! Do not edit.
+
+# YouTube cookies for bypassing bot detection
+# Format: domain	flag	path	secure	expiration	name	value
+
+# Example cookies (replace with your actual cookies):
+# .youtube.com	TRUE	/	TRUE	1234567890	VISITOR_INFO1_LIVE	your_visitor_info_here
+# .youtube.com	TRUE	/	TRUE	1234567890	YSC	your_ysc_here
+# .youtube.com	TRUE	/	TRUE	1234567890	PREF	your_pref_here
+
+# To get your cookies:
+# 1. Open YouTube in browser
+# 2. Login if needed
+# 3. Use browser dev tools > Application > Cookies
+# 4. Copy the cookie values above
