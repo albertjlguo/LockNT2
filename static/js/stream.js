@@ -13,6 +13,18 @@ class StreamManager {
         this.detectionInterval = null;
         this.statusInterval = null;
         
+        // Tracking & detection throttle config
+        // 追踪与检测节流配置
+        this.tracker = new window.Tracker({
+            enableReID: true,
+            focusClasses: ['person'],
+            autoCreate: false
+        });
+        this.detectEveryMs = 180; // Run detection ~5-6 FPS 检测节流（毫秒）
+        this.lastDetectionTime = 0;
+        this.lastScaledPredictions = [];
+        this.debug = false; // 控制调试日志开关
+        
         this.initializeElements();
         this.setupEventListeners();
     }
@@ -69,6 +81,54 @@ class StreamManager {
                 }
             });
         }
+
+        // Click-to-lock on detection overlay
+        // 在检测画布上捕获点击以锁定目标
+        if (this.detectionCanvas) {
+            this.detectionCanvas.style.pointerEvents = 'auto';
+            this.detectionCanvas.addEventListener('click', (e) => this.onCanvasClick(e));
+            // Right-click to clear all tracks 右键清空所有轨迹
+            this.detectionCanvas.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                if (this.tracker) {
+                    this.tracker.clear();
+                    this.lastScaledPredictions = [];
+                    this.clearOverlay();
+                    this.showAlert('Cleared all tracks', 'warning');
+                }
+            });
+        }
+
+        // Keyboard shortcuts 键盘快捷键
+        document.addEventListener('keydown', (e) => {
+            if (!this.isActive || !this.tracker) return;
+            // ignore when typing in input/textarea/select or contenteditable
+            const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+            if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || (e.target && e.target.isContentEditable)) return;
+            // ignore auto-repeated keydown when key is held
+            if (e.repeat) return;
+            const k = e.key;
+            if (k === 'l' || k === 'L') {
+                // Unlock all 解锁全部
+                for (const t of this.tracker.getTracks()) this.tracker.unlock(t.id);
+                this.clearOverlay();
+                this.drawTracks();
+                this.showAlert('All tracks unlocked', 'info');
+            } else if (k === 'c' || k === 'C') {
+                // Clear all 清空全部
+                this.tracker.clear();
+                this.lastScaledPredictions = [];
+                this.clearOverlay();
+                this.showAlert('Cleared all tracks', 'warning');
+            } else if (k === 'a' || k === 'A') {
+                // Toggle auto-create 切换自动创建
+                this.tracker.autoCreate = !this.tracker.autoCreate;
+                this.showAlert(`Auto-create ${this.tracker.autoCreate ? 'ON' : 'OFF'}`, 'info');
+            }
+        });
+
+        // Window resize handling 窗口缩放自适应
+        window.addEventListener('resize', () => this.onWindowResize());
     }
 
     /**
@@ -104,9 +164,10 @@ class StreamManager {
             this.isActive = true;
             this.currentStream = url;
             this.frameCount = 0;
+            if (this.tracker) this.tracker.clear(); // reset tracker on new stream
             
             // Update button states
-            this.updateButtonStates();
+            this.updateButtonStates(true);
             
             // Start status monitoring
             this.startStatusMonitoring();
@@ -151,6 +212,9 @@ class StreamManager {
             this.hideVideoDisplay();
             this.updateButtonStates(false);
             this.clearDetectionStats();
+            if (this.tracker) this.tracker.clear();
+            this.lastScaledPredictions = [];
+            this.clearOverlay();
             
             this.showAlert('Stream stopped', 'info');
             
@@ -227,7 +291,7 @@ class StreamManager {
         
         // Set up event handlers for the new image
         this.frameImage.onload = () => {
-            console.log('Frame loaded:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
+            if (this.debug) console.log('Frame loaded:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
             
             // Validate canvas context exists
             if (!this.videoContext) {
@@ -256,7 +320,7 @@ class StreamManager {
             const canvasHeight = this.videoCanvas.height;
             
             if (canvasWidth !== this.frameImage.naturalWidth || canvasHeight !== this.frameImage.naturalHeight) {
-                console.log('Updating canvas size to:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
+                if (this.debug) console.log('Updating canvas size to:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
                 this.setupCanvases(this.frameImage.naturalWidth, this.frameImage.naturalHeight);
             }
             
@@ -266,7 +330,7 @@ class StreamManager {
             // Draw frame to canvas
             try {
                 this.videoContext.drawImage(this.frameImage, 0, 0, this.videoCanvas.width, this.videoCanvas.height);
-                console.log('Frame drawn to canvas successfully');
+                if (this.debug) console.log('Frame drawn to canvas successfully');
             } catch (error) {
                 console.error('Error drawing frame to canvas:', error);
                 return;
@@ -277,10 +341,10 @@ class StreamManager {
             
             // Trigger AI detection if enabled
             if (this.isActive && window.detectionManager && window.detectionManager.isModelLoaded) {
-                console.log('Triggering AI detection...');
+                if (this.debug) console.log('Triggering AI detection...');
                 this.performDetection();
             } else {
-                console.log('AI detection not ready:', {
+                if (this.debug) console.log('AI detection not ready:', {
                     isActive: this.isActive,
                     detectionManager: !!window.detectionManager,
                     modelLoaded: window.detectionManager ? window.detectionManager.isModelLoaded : false
@@ -312,7 +376,7 @@ class StreamManager {
         
         const timestamp = Date.now() + Math.random() * 1000; // Add randomness to prevent caching
         const frameUrl = `./video_feed?t=${timestamp}&r=${Math.random()}`;
-        console.log('Fetching frame from:', frameUrl);
+        if (this.debug) console.log('Fetching frame from:', frameUrl);
         this.frameImage.src = frameUrl;
     }
 
@@ -401,9 +465,50 @@ class StreamManager {
             return;
         }
         
+        // Throttle detection for performance; predict-only in between
+        // 为性能进行检测节流；间隔帧仅做预测
+        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        const shouldDetect = !this.lastDetectionTime || (now - this.lastDetectionTime >= this.detectEveryMs);
+
+        if (!shouldDetect) {
+            try {
+                if (this.tracker) this.tracker.predictOnly();
+                this.clearOverlay();
+                this.drawTracks();
+            } catch (e) {
+                console.warn('Predict-only step failed:', e);
+            }
+            return;
+        }
+
         try {
+            // 运行检测
             const predictions = await window.detectionManager.detectObjects(this.frameImage);
+
+            // 将检测框缩放到画布坐标，用于追踪与点击匹配
+            const scaleX = this.detectionCanvas.width / (this.frameImage?.naturalWidth || this.detectionCanvas.width);
+            const scaleY = this.detectionCanvas.height / (this.frameImage?.naturalHeight || this.detectionCanvas.height);
+            const scaled = predictions.map(p => {
+                const [x, y, w, h] = p.bbox;
+                return {
+                    bbox: [x * scaleX, y * scaleY, w * scaleX, h * scaleY],
+                    score: p.score,
+                    class: p.class
+                };
+            });
+            this.lastScaledPredictions = scaled;
+
+            // 更新追踪器（传入视频画布上下文以提取外观特征）
+            if (this.tracker && this.videoContext) {
+                this.tracker.update(scaled, this.videoContext);
+            }
+
+            // 绘制检测框（内部自行缩放到画布）
             this.drawDetections(predictions);
+            // 叠加绘制追踪框与轨迹
+            this.drawTracks();
+
+            this.lastDetectionTime = now;
         } catch (error) {
             console.error('Detection error:', error);
         }
@@ -450,6 +555,117 @@ class StreamManager {
             this.detectionContext.fillStyle = 'white';
             this.detectionContext.fillText(label, scaledX + 5, scaledY - 8);
         });
+    }
+
+    /**
+     * Draw tracks (IDs, boxes, and trajectories)
+     * 绘制追踪框与轨迹（ID/锁定状态）
+     */
+    drawTracks() {
+        if (!this.detectionContext || !this.tracker) return;
+        const ctx = this.detectionContext;
+
+        const tracks = this.tracker.getTracks();
+        for (const t of tracks) {
+            const b = t.bbox;
+            ctx.save();
+            ctx.strokeStyle = t.color;
+            ctx.lineWidth = t.locked ? 3 : 2;
+            ctx.setLineDash(t.locked ? [6, 4] : []);
+            ctx.strokeRect(b.x, b.y, b.w, b.h);
+
+            // Draw ID label
+            const label = `ID ${t.id}${t.locked ? ' • LOCK' : ''}`;
+            ctx.font = '14px Arial';
+            const tw = ctx.measureText(label).width;
+            ctx.fillStyle = t.color;
+            ctx.globalAlpha = 0.9;
+            ctx.fillRect(b.x, Math.max(0, b.y - 22), tw + 10, 20);
+            ctx.fillStyle = '#fff';
+            ctx.globalAlpha = 1.0;
+            ctx.fillText(label, b.x + 5, Math.max(14, b.y - 6));
+
+            // Draw trajectory
+            if (t.trajectory && t.trajectory.length > 1) {
+                ctx.beginPath();
+                ctx.lineWidth = 2;
+                ctx.setLineDash([]);
+                ctx.strokeStyle = t.color;
+                let first = true;
+                for (const p of t.trajectory) {
+                    const px = p.x, py = p.y;
+                    if (first) { ctx.moveTo(px, py); first = false; }
+                    else { ctx.lineTo(px, py); }
+                }
+                ctx.stroke();
+            }
+
+            ctx.restore();
+        }
+    }
+
+    /**
+     * Clear only the overlay canvas
+     * 清空叠加层画布
+     */
+    clearOverlay() {
+        if (this.detectionContext) {
+            this.detectionContext.clearRect(0, 0, this.detectionCanvas.width, this.detectionCanvas.height);
+        }
+    }
+
+    /**
+     * Handle click on overlay: map to canvas coords and lock a track
+     * 处理画布点击：坐标映射并锁定目标
+     */
+    onCanvasClick(e) {
+        if (!this.detectionCanvas || !this.tracker) return;
+        const rect = this.detectionCanvas.getBoundingClientRect();
+        const scaleX = this.detectionCanvas.width / rect.width;
+        const scaleY = this.detectionCanvas.height / rect.height;
+        const x = (e.clientX - rect.left) * scaleX;
+        const y = (e.clientY - rect.top) * scaleY;
+        
+        // Toggle lock: if clicking hits a track, toggle lock/unlock directly; otherwise try detection-based locking
+        const tracks = this.tracker.getTracks();
+        const hit = tracks.find(t => {
+            const b = t.bbox; return x >= b.x && y >= b.y && x <= b.x + b.w && y <= b.y + b.h;
+        });
+        if (hit) {
+            if (hit.locked) {
+                this.tracker.unlock(hit.id);
+                this.showAlert(`Unlocked target #${hit.id}`, 'info');
+            } else {
+                hit.locked = true;
+                hit.lostFrames = 0;
+                this.showAlert(`Locked target #${hit.id}`, 'success');
+            }
+            this.clearOverlay();
+            this.drawTracks();
+            return;
+        }
+
+        const id = this.tracker.lockFromPoint(x, y, this.lastScaledPredictions || [], this.videoContext);
+        if (id) {
+            this.showAlert(`Locked target #${id}`, 'success');
+            // 立即绘制最新轨迹
+            this.clearOverlay();
+            this.drawTracks();
+        }
+    }
+
+    /**
+     * Handle window resize to keep canvases sized to container
+     * 处理窗口缩放，保持画布尺寸与容器一致
+     */
+    onWindowResize() {
+        if (!this.videoCanvas || !this.detectionCanvas) return;
+        const w = this.videoCanvas.width || 800;
+        const h = this.videoCanvas.height || 450;
+        this.setupCanvases(w, h);
+        // 重绘轨迹避免缩放后残影
+        this.clearOverlay();
+        this.drawTracks();
     }
 
     /**
