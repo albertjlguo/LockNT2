@@ -278,9 +278,6 @@ class ObjectDetectionManager {
 // Global detection manager instance
 window.detectionManager = new ObjectDetectionManager();
 
-// Global tracker instance
-window.tracker = new Tracker();
-
 // Initialize detection manager when page loads
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('Loading object detection model...');
