@@ -164,7 +164,7 @@ class StreamProcessor:
                             self.latest_frame = buffer.tobytes()
                         
                         # Small delay to prevent overwhelming the system
-                        time.sleep(0.033)  # ~30 FPS
+                        time.sleep(0.1)  # ~10 FPS for stability
                         
                     except Exception as frame_error:
                         logging.error(f"Error processing frame: {str(frame_error)}")

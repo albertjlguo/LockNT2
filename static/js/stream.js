@@ -208,11 +208,24 @@ class StreamManager {
     startFrameFetching() {
         console.log('Starting frame fetching...');
         
-        this.frameImage = new Image();
-        this.frameImage.crossOrigin = 'anonymous';
         this.frameLoadCount = 0;
         this.frameErrorCount = 0;
         
+        // Start fetching frames
+        this.fetchNextFrame();
+    }
+    
+    /**
+     * Fetch next frame from backend
+     */
+    fetchNextFrame() {
+        if (!this.isActive) return;
+        
+        // Create a new Image object for each frame to avoid caching issues
+        this.frameImage = new Image();
+        this.frameImage.crossOrigin = 'anonymous';
+        
+        // Set up event handlers for the new image
         this.frameImage.onload = () => {
             console.log('Frame loaded:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
             
@@ -263,13 +276,20 @@ class StreamManager {
             this.frameCount++;
             
             // Trigger AI detection if enabled
-            if (this.isActive && window.detectionManager && window.detectionManager.isModelLoaded()) {
+            if (this.isActive && window.detectionManager && window.detectionManager.isModelLoaded) {
+                console.log('Triggering AI detection...');
                 this.performDetection();
+            } else {
+                console.log('AI detection not ready:', {
+                    isActive: this.isActive,
+                    detectionManager: !!window.detectionManager,
+                    modelLoaded: window.detectionManager ? window.detectionManager.isModelLoaded : false
+                });
             }
             
-            // Schedule next frame fetch
+            // Schedule next frame fetch immediately to maintain continuous flow
             if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 33); // ~30 FPS
+                setTimeout(() => this.fetchNextFrame(), 50); // ~20 FPS for smoother video
             }
         };
         
@@ -284,23 +304,14 @@ class StreamManager {
                 return;
             }
             
+            // Continue fetching even after error to maintain video flow
             if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 1000);
+                setTimeout(() => this.fetchNextFrame(), 500);
             }
         };
         
-        // Start fetching frames
-        this.fetchNextFrame();
-    }
-    
-    /**
-     * Fetch next frame from backend
-     */
-    fetchNextFrame() {
-        if (!this.isActive) return;
-        
-        const timestamp = Date.now();
-        const frameUrl = `/video_feed?t=${timestamp}`;
+        const timestamp = Date.now() + Math.random() * 1000; // Add randomness to prevent caching
+        const frameUrl = `./video_feed?t=${timestamp}&r=${Math.random()}`;
         console.log('Fetching frame from:', frameUrl);
         this.frameImage.src = frameUrl;
     }
@@ -383,11 +394,29 @@ class StreamManager {
     }
 
     /**
+     * Perform detection on current frame
+     */
+    async performDetection() {
+        if (!this.frameImage || !window.detectionManager || !window.detectionManager.isModelLoaded) {
+            return;
+        }
+        
+        try {
+            const predictions = await window.detectionManager.detectObjects(this.frameImage);
+            this.drawDetections(predictions);
+        } catch (error) {
+            console.error('Detection error:', error);
+        }
+    }
+
+    /**
      * Draw detection bounding boxes and labels
      */
     drawDetections(predictions) {
         if (!this.detectionContext || !predictions) return;
 
+        console.log('Drawing detections:', predictions.length);
+        
         // Clear previous detections
         this.detectionContext.clearRect(0, 0, this.detectionCanvas.width, this.detectionCanvas.height);
 
