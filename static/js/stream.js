@@ -12,6 +12,8 @@ class StreamManager {
         this.currentStream = null;
         this.detectionInterval = null;
         this.statusInterval = null;
+        this.lastPredictions = []; // Store the last set of predictions for click handling
+
         
         this.initializeElements();
         this.setupEventListeners();
@@ -66,6 +68,22 @@ class StreamManager {
             urlInput.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') {
                     this.startStream();
+                }
+            });
+        }
+
+        // Click on canvas to select a target
+        if (this.detectionCanvas) {
+            this.detectionCanvas.addEventListener('click', (e) => {
+                if (!this.isActive) return;
+
+                const rect = this.detectionCanvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                // Use the last known predictions to find the clicked object
+                if (window.tracker && this.lastPredictions.length > 0) {
+                    window.tracker.select_target(x, y, this.lastPredictions);
                 }
             });
         }
@@ -403,6 +421,13 @@ class StreamManager {
         
         try {
             const predictions = await window.detectionManager.detectObjects(this.frameImage);
+            this.lastPredictions = predictions; // Save predictions for click handler
+
+            // Update tracker with new detections
+            if (window.tracker) {
+                window.tracker.update(predictions);
+            }
+
             this.drawDetections(predictions);
         } catch (error) {
             console.error('Detection error:', error);
@@ -450,6 +475,11 @@ class StreamManager {
             this.detectionContext.fillStyle = 'white';
             this.detectionContext.fillText(label, scaledX + 5, scaledY - 8);
         });
+
+        // Draw tracking results on top of detections
+        if (window.tracker) {
+            window.tracker.draw(this.detectionContext);
+        }
     }
 
     /**
