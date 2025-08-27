@@ -93,7 +93,7 @@ class StreamManager {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        youtube_url: urlInput.value.trim()
+                        url: urlInput.value.trim()
                     }),
                     timeout: 30000 // 30 second timeout
                 });
@@ -108,7 +108,10 @@ class StreamManager {
                 
                 this.isActive = true;
                 this.frameErrorCount = 0;
-                this.updateUI();
+                this.frameCount = 0;
+                this.setupVideoDisplay();
+                this.updateButtonStates(true);
+                this.startStatusMonitoring();
                 
                 // Start frame fetching after a short delay to allow stream to initialize
                 setTimeout(() => {
@@ -122,7 +125,7 @@ class StreamManager {
                 console.error(`Stream start attempt ${retryCount} failed:`, error);
                 
                 if (retryCount >= maxRetries) {
-                    this.showError(`Failed to start stream after ${maxRetries} attempts: ${error.message}`);
+                    this.showAlert(`Failed to start stream after ${maxRetries} attempts: ${error.message}`, 'danger');
                     return;
                 }
                 
@@ -595,6 +598,37 @@ class StreamManager {
         this.hideVideoDisplay();
         this.updateButtonStates(false);
         this.showAlert(message, 'danger');
+    }
+
+    /**
+     * Handle stream restart after too many errors
+     */
+    handleStreamRestart() {
+        console.log('Attempting to restart stream...');
+        this.stopDetection();
+        this.frameErrorCount = 0;
+        
+        // Wait a bit before restarting
+        setTimeout(() => {
+            if (this.isActive) {
+                this.startFrameFetching();
+            }
+        }, 3000);
+    }
+
+    /**
+     * Calculate adaptive frame delay based on performance
+     */
+    calculateFrameDelay() {
+        // Base delay of ~30 FPS (33ms), but adjust based on errors
+        let baseDelay = 33;
+        
+        if (this.frameErrorCount > 0) {
+            // Slow down if we're having errors
+            baseDelay = Math.min(100 + (this.frameErrorCount * 50), 1000);
+        }
+        
+        return baseDelay;
     }
 
     /**
