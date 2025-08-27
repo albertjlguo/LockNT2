@@ -9,10 +9,8 @@ import time
 
 # Global stream processor instance
 stream_processor = None
-fallback_source = None
 processing_thread = None
 is_processing = False
-using_fallback = False
 
 @app.route('/')
 def index():
@@ -37,10 +35,6 @@ def start_stream():
         # Create new stream processor
         stream_processor = StreamProcessor(youtube_url)
         
-        # Initialize fallback source
-        global fallback_source
-        fallback_source = FallbackVideoSource()
-        
         # In production, skip strict validation to avoid bot detection issues
         # Just log a warning if validation fails but continue anyway
         try:
@@ -49,19 +43,8 @@ def start_stream():
         except Exception as validation_error:
             logging.warning(f"Stream validation error (continuing anyway): {validation_error}")
         
-        # Start processing in background thread with fallback monitoring
-        def start_with_fallback():
-            global using_fallback
-            try:
-                # Try primary stream first
-                stream_processor.start_processing()
-            except Exception as e:
-                logging.error(f"Primary stream failed, starting fallback: {str(e)}")
-                # Start fallback if primary fails
-                fallback_source.start_test_pattern_stream()
-                using_fallback = True
-        
-        processing_thread = threading.Thread(target=start_with_fallback)
+        # Start processing in background thread
+        processing_thread = threading.Thread(target=stream_processor.start_processing)
         processing_thread.daemon = True
         processing_thread.start()
         
@@ -109,59 +92,28 @@ def stream_status():
 @app.route('/video_feed')
 def video_feed():
     """Get current video frame as JPEG image."""
-    global stream_processor, fallback_source, using_fallback
+    global stream_processor
     
-    if not is_processing:
+    if not stream_processor or not is_processing:
         logging.warning("Video feed requested but no active stream")
         return Response("No active stream", status=404)
     
-    frame = None
-    
-    # Try to get frame from primary stream first
-    if stream_processor and not using_fallback:
-        frame = stream_processor.get_latest_frame()
-        
-        # If no frame from primary, check if we should switch to fallback
-        if frame is None:
-            logging.warning("No frame from primary stream, checking fallback...")
-            if fallback_source and not using_fallback:
-                logging.info("Starting fallback source due to primary stream failure")
-                fallback_source.start_test_pattern_stream()
-                using_fallback = True
-    
-    # Get frame from fallback if using fallback or primary failed
-    if using_fallback and fallback_source:
-        frame = fallback_source.get_latest_frame()
-    
+    frame = stream_processor.get_latest_frame()
     if frame is not None:
         return Response(frame, mimetype='image/jpeg')
     else:
-        # Start fallback as last resort
-        if not using_fallback and fallback_source:
-            logging.info("Starting emergency fallback source")
-            fallback_source.start_test_pattern_stream()
-            using_fallback = True
-            frame = fallback_source.get_latest_frame()
-            if frame:
-                return Response(frame, mimetype='image/jpeg')
-        
-        logging.error(f"No frame available from any source")
-        return Response("No frame available - all sources failed", status=503)
+        # Log the reason for 503 error to help diagnose the issue
+        logging.error(f"No frame available - Stream URL extraction may have failed. Stream processor status: running={stream_processor.is_running}")
+        return Response("No frame available - stream processing failed", status=503)
 
 def stop_stream_processing():
     """Helper function to stop stream processing."""
-    global stream_processor, fallback_source, processing_thread, is_processing, using_fallback
+    global stream_processor, processing_thread, is_processing
     
     is_processing = False
-    using_fallback = False
-    
     if stream_processor:
         stream_processor.stop()
         stream_processor = None
-    
-    if fallback_source:
-        fallback_source.stop()
-        fallback_source = None
     
     if processing_thread and processing_thread.is_alive():
         processing_thread.join(timeout=2)

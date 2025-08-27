@@ -67,28 +67,20 @@ class StreamProcessor:
     def get_stream_url(self):
         """Get the direct stream URL using yt-dlp with bot detection bypass."""
         try:
-            # Check for cookies file - try updated version first
-            cookies_file = "cookies_updated.txt" if os.path.exists("cookies_updated.txt") else "cookies.txt"
+            # Check for cookies file
+            cookies_file = "cookies.txt"
             use_cookies = os.path.exists(cookies_file)
             
-            # First attempt: Enhanced extraction with anti-bot measures
+            # First attempt: Standard extraction with user agent and headers
             cmd = [
                 'yt-dlp',
                 '--get-url',
                 '--format', 'best[height<=720]',
                 '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 '--add-header', 'Accept-Language:en-US,en;q=0.9',
-                '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                '--add-header', 'Accept-Encoding:gzip, deflate, br',
-                '--add-header', 'DNT:1',
-                '--add-header', 'Connection:keep-alive',
-                '--add-header', 'Upgrade-Insecure-Requests:1',
-                '--extractor-retries', '5',
-                '--socket-timeout', '45',
+                '--extractor-retries', '3',
+                '--socket-timeout', '30',
                 '--no-check-certificate',
-                '--sleep-interval', '1',
-                '--max-sleep-interval', '3',
-                '--verbose',
             ]
             
             # Add cookies if available
@@ -117,23 +109,17 @@ class StreamProcessor:
             else:
                 logging.warning(f"First attempt failed with return code {result.returncode}")
             
-            # Fallback attempt: Alternative extraction method
+            # Fallback attempt: Lower quality with more aggressive settings
             fallback_cmd = [
                 'yt-dlp',
                 '--get-url',
-                '--format', 'worst[height>=360]/best[height<=480]',
-                '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--format', 'best[height<=480]',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 '--add-header', 'Accept-Language:en-US,en;q=0.9',
-                '--add-header', 'Sec-Fetch-Dest:document',
-                '--add-header', 'Sec-Fetch-Mode:navigate',
-                '--add-header', 'Sec-Fetch-Site:none',
-                '--extractor-retries', '8',
-                '--socket-timeout', '90',
+                '--extractor-retries', '5',
+                '--socket-timeout', '60',
                 '--no-check-certificate',
                 '--ignore-errors',
-                '--sleep-interval', '2',
-                '--max-sleep-interval', '5',
-                '--verbose',
             ]
             
             # Add cookies to fallback as well
@@ -160,39 +146,7 @@ class StreamProcessor:
                 logging.error(f"Both extraction attempts failed. YouTube may be blocking access.")
                 logging.error(f"Consider adding cookies or using a different approach.")
                 
-                # Third attempt: Use alternative approach with different format
-                logging.info("Attempting third extraction method with alternative format...")
-                alt_cmd = [
-                    'yt-dlp',
-                    '--get-url',
-                    '--format', '(best[height<=480]/worst)[protocol^=http]',
-                    '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    '--extractor-retries', '10',
-                    '--socket-timeout', '120',
-                    '--no-check-certificate',
-                    '--ignore-errors',
-                    '--sleep-interval', '3',
-                    '--max-sleep-interval', '8',
-                    '--no-warnings',
-                ]
-                
-                if use_cookies:
-                    alt_cmd.extend(['--cookies', cookies_file])
-                    
-                alt_cmd.append(self.youtube_url)
-                
-                try:
-                    alt_result = subprocess.run(alt_cmd, capture_output=True, text=True, timeout=90)
-                    if alt_result.returncode == 0 and alt_result.stdout.strip():
-                        stream_url = alt_result.stdout.strip()
-                        logging.info(f"Alternative extraction successful: {stream_url[:100]}...")
-                        return stream_url
-                    else:
-                        logging.error("All extraction methods failed")
-                        return None
-                except Exception as alt_error:
-                    logging.error(f"Alternative extraction failed: {str(alt_error)}")
-                    return None
+                return None
                 
         except subprocess.TimeoutExpired:
             logging.error("Timeout while extracting stream URL")
