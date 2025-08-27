@@ -13,6 +13,13 @@ class StreamManager {
         this.detectionInterval = null;
         this.statusInterval = null;
         
+        // Frame management for better memory usage
+        // 帧管理以优化内存使用
+        this.frameImage = null;
+        this.frameCount = 0;
+        this.frameErrorCount = 0;
+        this.frameLoadCount = 0;
+        
         // Tracking & detection throttle config
         // 追踪与检测节流配置
         this.tracker = new window.Tracker({
@@ -20,7 +27,7 @@ class StreamManager {
             focusClasses: ['person'],
             autoCreate: false
         });
-        this.detectEveryMs = 180; // Run detection ~5-6 FPS 检测节流（毫秒）
+        this.detectEveryMs = 200; // Run detection ~5 FPS 检测节流（毫秒）
         this.lastDetectionTime = 0;
         this.lastScaledPredictions = [];
         this.debug = false; // 控制调试日志开关
@@ -308,9 +315,16 @@ class StreamManager {
     fetchNextFrame() {
         if (!this.isActive) return;
         
-        // Create a new Image object for each frame to avoid caching issues
-        this.frameImage = new Image();
-        this.frameImage.crossOrigin = 'anonymous';
+        // Reuse image object or create new one for better memory management
+        // 重用图像对象或创建新对象以优化内存管理
+        if (!this.frameImage) {
+            this.frameImage = new Image();
+            this.frameImage.crossOrigin = 'anonymous';
+        } else {
+            // Clear previous image source to free memory
+            // 清空之前的图像源以释放内存
+            this.frameImage.src = '';
+        }
         
         // Set up event handlers for the new image
         this.frameImage.onload = () => {
@@ -374,9 +388,10 @@ class StreamManager {
                 });
             }
             
-            // Schedule next frame fetch immediately to maintain continuous flow
+            // Schedule next frame fetch with appropriate interval for smooth video
+            // 安排下次帧获取，使用适当间隔保证流畅视频
             if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 16); // ~60 FPS for ultra smooth video
+                setTimeout(() => this.fetchNextFrame(), 50); // ~20 FPS for smooth video while reducing load
             }
         };
         
@@ -439,45 +454,14 @@ class StreamManager {
     }
 
     /**
-     * Start object detection processing
+     * Start object detection processing (now handled in performDetection during frame fetch)
+     * 开始目标检测处理（现在在帧获取时通过performDetection处理）
      */
     startDetection() {
-        if (this.detectionInterval) {
-            clearInterval(this.detectionInterval);
-        }
-
+        // Reset error counter for detection
+        // 重置检测错误计数器
         this.detectionErrorCount = 0;
-        
-        this.detectionInterval = setInterval(async () => {
-            if (!this.isActive || !this.frameImage || !window.detectionManager) return;
-
-            // Validate frame before detection
-            if (!this.isFrameValid()) {
-                return; // Skip this detection cycle
-            }
-
-            try {
-                // Perform object detection on the current frame
-                const predictions = await window.detectionManager.detectObjects(this.frameImage);
-                
-                // Draw detection results
-                this.drawDetections(predictions);
-                
-                // Reset error count on successful detection
-                this.detectionErrorCount = 0;
-                
-            } catch (error) {
-                this.detectionErrorCount++;
-                console.error(`Detection error (${this.detectionErrorCount}):`, error.message);
-                
-                // Stop detection if too many errors
-                if (this.detectionErrorCount >= 5) {
-                    console.error('Too many detection errors, stopping detection');
-                    this.stopDetection();
-                    this.showAlert('AI detection stopped due to repeated errors', 'warning');
-                }
-            }
-        }, 200); // 5 FPS detection rate (less frequent than frame updates)
+        console.log('Detection enabled - will run during frame processing');
     }
 
     /**
@@ -526,9 +510,15 @@ class StreamManager {
                 this.tracker.update(scaled, this.videoContext);
             }
 
-            // 仅绘制追踪框（不显示检测框）
-            this.clearOverlay();
-            this.drawTracks();
+            // 仅绘制追踪框（不显示检测框），只在有锁定目标时重绘
+            // Only redraw tracking overlay when there are locked targets
+            if (this.tracker.getTracks().some(t => t.locked)) {
+                this.clearOverlay();
+                this.drawTracks();
+            } else {
+                // Clear overlay if no locked targets
+                this.clearOverlay();
+            }
 
             this.lastDetectionTime = now;
         } catch (error) {
