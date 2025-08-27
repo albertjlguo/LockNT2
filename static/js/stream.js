@@ -289,7 +289,7 @@ class StreamManager {
             
             // Schedule next frame fetch immediately to maintain continuous flow
             if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 50); // ~20 FPS for smoother video
+                setTimeout(() => this.fetchNextFrame(), 16); // ~60 FPS for ultra smooth video
             }
         };
         
