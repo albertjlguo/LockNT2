@@ -429,17 +429,30 @@ class StreamManager {
     }
 
     /**
-     * Validate if current frame is ready for detection
+     * Validate if current frame is ready for detection with detailed logging
+     * 验证当前帧是否准备好进行检测，包含详细日志
      */
     isFrameValid() {
         if (!this.frameImage) {
+            if (this.debug) console.log('Frame validation failed: no frameImage');
             return false;
         }
         
         // Check if image is loaded and has valid dimensions
-        if (this.frameImage.complete && 
-            this.frameImage.naturalWidth > 0 && 
-            this.frameImage.naturalHeight > 0) {
+        const isComplete = this.frameImage.complete;
+        const naturalWidth = this.frameImage.naturalWidth || this.frameImage.width || 0;
+        const naturalHeight = this.frameImage.naturalHeight || this.frameImage.height || 0;
+        
+        if (this.debug) {
+            console.log('Frame validation:', {
+                complete: isComplete,
+                naturalWidth,
+                naturalHeight,
+                src: this.frameImage.src?.substring(0, 50) + '...'
+            });
+        }
+        
+        if (isComplete && naturalWidth > 0 && naturalHeight > 0) {
             return true;
         }
         
@@ -530,15 +543,33 @@ class StreamManager {
             // 运行检测
             const predictions = await window.detectionManager.detectObjects(this.frameImage);
 
-            // 将检测框缩放到画布坐标，用于追踪与点击匹配
-            const scaleX = this.detectionCanvas.width / (this.frameImage?.naturalWidth || this.detectionCanvas.width);
-            const scaleY = this.detectionCanvas.height / (this.frameImage?.naturalHeight || this.detectionCanvas.height);
+            // 精确的坐标缩放处理，确保检测框与显示一致
+            // Precise coordinate scaling to ensure detection boxes match display
+            const imageWidth = this.frameImage?.naturalWidth || this.frameImage?.width || this.detectionCanvas.width;
+            const imageHeight = this.frameImage?.naturalHeight || this.frameImage?.height || this.detectionCanvas.height;
+            const scaleX = this.detectionCanvas.width / imageWidth;
+            const scaleY = this.detectionCanvas.height / imageHeight;
+            
+            console.log(`Scaling from ${imageWidth}x${imageHeight} to ${this.detectionCanvas.width}x${this.detectionCanvas.height}, factors: ${scaleX.toFixed(3)}, ${scaleY.toFixed(3)}`);
+            
             const scaled = predictions.map(p => {
                 const [x, y, w, h] = p.bbox;
+                const scaledBbox = [x * scaleX, y * scaleY, w * scaleX, h * scaleY];
+                
+                // 验证缩放后的坐标是否合理
+                // Validate scaled coordinates are reasonable
+                if (scaledBbox[0] < 0 || scaledBbox[1] < 0 || 
+                    scaledBbox[0] + scaledBbox[2] > this.detectionCanvas.width ||
+                    scaledBbox[1] + scaledBbox[3] > this.detectionCanvas.height) {
+                    console.warn('Scaled bbox out of canvas bounds:', scaledBbox, 'Canvas:', this.detectionCanvas.width, 'x', this.detectionCanvas.height);
+                }
+                
                 return {
-                    bbox: [x * scaleX, y * scaleY, w * scaleX, h * scaleY],
+                    bbox: scaledBbox,
                     score: p.score,
-                    class: p.class
+                    class: p.class,
+                    originalBbox: p.bbox, // 保留原始坐标用于调试
+                    scaleFactors: { x: scaleX, y: scaleY }
                 };
             });
             this.lastScaledPredictions = scaled;

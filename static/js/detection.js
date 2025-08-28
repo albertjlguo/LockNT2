@@ -119,8 +119,8 @@ class ObjectDetectionManager {
     }
 
     /**
-     * Enhanced object detection with bounding box refinement
-     * 增强的目标检测，包含边界框优化
+     * Enhanced object detection with improved coordinate handling
+     * 增强的目标检测，改进坐标处理
      */
     async detectObjects(videoElement) {
         if (!this.isModelLoaded || !this.model) {
@@ -130,8 +130,14 @@ class ObjectDetectionManager {
 
         try {
             // Get raw predictions from COCO-SSD model
-            // 从COCO-SSD模型获取原始预测结果
+            // 从 COCO-SSD 模型获取原始预测结果
             const rawPredictions = await this.model.detect(videoElement);
+            
+            // Log detection info for debugging
+            // 记录检测信息用于调试
+            if (rawPredictions.length > 0) {
+                console.log(`Detected ${rawPredictions.length} objects on ${videoElement.naturalWidth || videoElement.width}x${videoElement.naturalHeight || videoElement.height} image`);
+            }
             
             // Apply bounding box refinement and filtering
             // 应用边界框优化和过滤
@@ -146,11 +152,16 @@ class ObjectDetectionManager {
     }
     
     /**
-     * Refine bounding boxes for better target wrapping
-     * 优化边界框以更好地包裹目标
+     * Refine bounding boxes with improved accuracy and coordinate validation
+     * 优化边界框，提高准确性和坐标验证
      */
     refineBoundingBoxes(predictions, videoElement) {
         if (!predictions || predictions.length === 0) return [];
+        
+        // Get image dimensions for coordinate validation
+        // 获取图像尺寸用于坐标验证
+        const imageWidth = videoElement.naturalWidth || videoElement.width || 640;
+        const imageHeight = videoElement.naturalHeight || videoElement.height || 480;
         
         return predictions.map(pred => {
             // Filter to only detect persons and cars
@@ -165,13 +176,42 @@ class ObjectDetectionManager {
             const minConfidence = this.confidenceThresholds[pred.class] || 0.3;
             if (pred.score < minConfidence) return null;
             
-            // Refine bounding box dimensions
-            // 优化边界框尺寸
+            // Validate original bbox coordinates
+            // 验证原始边界框坐标
+            const [x, y, w, h] = pred.bbox;
+            if (x < 0 || y < 0 || w <= 0 || h <= 0 || 
+                x + w > imageWidth || y + h > imageHeight) {
+                console.warn('Invalid bbox coordinates:', pred.bbox, 'Image size:', imageWidth, 'x', imageHeight);
+                // Clamp to valid range
+                const clampedBbox = [
+                    Math.max(0, Math.min(x, imageWidth - 1)),
+                    Math.max(0, Math.min(y, imageHeight - 1)),
+                    Math.max(1, Math.min(w, imageWidth - Math.max(0, x))),
+                    Math.max(1, Math.min(h, imageHeight - Math.max(0, y)))
+                ];
+                pred.bbox = clampedBbox;
+            }
+            
+            // Apply conservative bounding box optimization
+            // 应用保守的边界框优化
             const refinedBbox = this.optimizeBoundingBox(pred.bbox, pred.class, pred.score);
+            
+            // Final coordinate validation after optimization
+            // 优化后的最终坐标验证
+            const [fx, fy, fw, fh] = refinedBbox;
+            const finalBbox = [
+                Math.max(0, Math.min(fx, imageWidth - 1)),
+                Math.max(0, Math.min(fy, imageHeight - 1)),
+                Math.max(1, Math.min(fw, imageWidth - Math.max(0, fx))),
+                Math.max(1, Math.min(fh, imageHeight - Math.max(0, fy)))
+            ];
             
             return {
                 ...pred,
-                bbox: refinedBbox,
+                bbox: finalBbox,
+                // Store original image dimensions for scaling reference
+                // 存储原始图像尺寸作为缩放参考
+                originalImageSize: { width: imageWidth, height: imageHeight },
                 // Add stability score for tracking
                 // 添加用于追踪的稳定性分数
                 stability: this.calculateStabilityScore(pred.score, pred.class)
@@ -180,51 +220,64 @@ class ObjectDetectionManager {
     }
     
     /**
-     * Optimize bounding box based on object class and confidence
-     * 根据目标类别和置信度优化边界框
+     * Optimize bounding box based on object class and confidence with improved accuracy
+     * 根据目标类别和置信度优化边界框，提高准确性
      */
     optimizeBoundingBox(bbox, objectClass, confidence) {
         const [x, y, width, height] = bbox;
         
-        // Class-specific adjustments for better wrapping
-        // 针对不同类别的特定调整以改善包裹效果
+        // Validate input bbox
+        // 验证输入边界框
+        if (width <= 0 || height <= 0) {
+            console.warn('Invalid bbox dimensions:', bbox);
+            return bbox; // Return original if invalid
+        }
+        
+        // Conservative adjustments to maintain accuracy
+        // 保守的调整以维持准确性
         let adjustmentFactor = 1.0;
-        let paddingRatio = 0.05; // 5% padding by default
+        let paddingRatio = 0.02; // Reduced padding for better accuracy
         
         switch (objectClass) {
             case 'person':
-                // Persons often have loose bounding boxes, tighten them
-                // 人物检测框通常较松散，需要收紧
-                adjustmentFactor = 0.95;
-                paddingRatio = 0.03;
+                // Minimal adjustment for persons to maintain detection accuracy
+                // 对人物进行最小调整以维持检测准确性
+                adjustmentFactor = confidence > 0.8 ? 0.98 : 1.0;
+                paddingRatio = 0.01;
                 break;
             case 'car':
-                // Cars need tighter boxes for better tracking
-                // 汽车需要更紧密的框以便更好追踪
-                adjustmentFactor = 0.92;
-                paddingRatio = 0.02;
+                // Slight tightening for cars only when high confidence
+                // 仅在高置信度时对汽车进行轻微收紧
+                adjustmentFactor = confidence > 0.8 ? 0.97 : 1.0;
+                paddingRatio = 0.015;
                 break;
             default:
-                // Default adjustment for person and car only
-                // 仅针对人和汽车的默认调整
-                adjustmentFactor = confidence > 0.7 ? 0.96 : 1.02;
+                // No adjustment for unknown classes
+                // 未知类别不进行调整
+                adjustmentFactor = 1.0;
+                paddingRatio = 0.01;
         }
         
-        // Apply adjustments
-        // 应用调整
+        // Apply conservative adjustments
+        // 应用保守的调整
         const centerX = x + width / 2;
         const centerY = y + height / 2;
         const newWidth = width * adjustmentFactor;
         const newHeight = height * adjustmentFactor;
         
-        // Add padding for stability
-        // 添加填充以提高稳定性
+        // Add minimal padding for stability without affecting accuracy
+        // 添加最小填充以提高稳定性而不影响准确性
         const paddedWidth = newWidth * (1 + paddingRatio);
         const paddedHeight = newHeight * (1 + paddingRatio);
         
+        // Ensure the adjusted bbox doesn't go negative
+        // 确保调整后的边界框不为负数
+        const finalX = Math.max(0, centerX - paddedWidth / 2);
+        const finalY = Math.max(0, centerY - paddedHeight / 2);
+        
         return [
-            centerX - paddedWidth / 2,
-            centerY - paddedHeight / 2,
+            finalX,
+            finalY,
             paddedWidth,
             paddedHeight
         ];
