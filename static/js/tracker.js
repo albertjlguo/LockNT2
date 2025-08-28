@@ -364,8 +364,17 @@
       this.cy = bbox.y + bbox.h / 2;
       this.w = bbox.w; this.h = bbox.h;
       this.vx = 0; this.vy = 0;
-      this.alpha = opts.alpha ?? 0.7; // Increased for better responsiveness
-      this.beta = opts.beta ?? 0.3;   // Reduced for smoother velocity updates
+      // Use Kalman filter for motion prediction instead of simple alpha-beta
+      this.useKalmanFilter = true;
+      this.kalmanFilter = new KalmanFilter(bbox, {
+        processNoise: 2.0,
+        measurementNoise: 8.0,
+        velocityNoise: 10.0
+      });
+      
+      // Keep legacy parameters for fallback
+      this.alpha = opts.alpha ?? 0.5;
+      this.beta = opts.beta ?? 0.2;
       this.locked = !!opts.locked;
       this.color = COLOR_POOL[(id - 1) % COLOR_POOL.length];
       this.feature = null; // EMA feature
@@ -393,24 +402,27 @@
         maxHistory: 10
       };
       
-      // Enhanced appearance model for ID consistency in crowded scenes
-      // 针对密集场景ID一致性的增强外观模型
+      // Enhanced appearance model for maximum ID consistency
+      // 针对最大ID一致性的增强外观模型
       this.appearanceModel = {
         templates: [], // Multiple appearance templates
         weights: [],   // Template weights
-        maxTemplates: 7,  // Further increased for better discrimination
-        updateThreshold: 0.65,  // Slightly higher for stability
-        discriminativeThreshold: 0.75, // Threshold for high-confidence matches
-        spatialConsistency: true // Enable spatial layout consistency
+        maxTemplates: 10,  // Increased for better discrimination
+        updateThreshold: 0.70,  // Higher for stability
+        discriminativeThreshold: 0.80, // Higher threshold for matches
+        spatialConsistency: true, // Enable spatial layout consistency
+        strictMode: true // Enable strict appearance matching
       };
       
-      // ID switching prevention mechanisms
-      // ID切换防护机制
+      // Enhanced ID switching prevention
+      // 增强的ID切换防护
       this.idConsistency = {
         recentMatches: [], // Track recent successful matches
-        maxMatchHistory: 10,
-        consistencyThreshold: 0.7, // Minimum consistency score
-        switchPenalty: 0.3 // Penalty for potential ID switches
+        maxMatchHistory: 15, // Longer history for better consistency
+        consistencyThreshold: 0.75, // Higher minimum consistency score
+        switchPenalty: 0.5, // Higher penalty for potential ID switches
+        stabilityBonus: 0.2, // Bonus for consistent matches
+        minMatchesForStability: 5 // Minimum matches before considering stable
       };
       
       this._pushTrajectory();
@@ -423,101 +435,113 @@
       if (this.trajectory.length > 60) this.trajectory.shift();
     }
 
-    /** Enhanced prediction with motion model and occlusion handling */
+    /** Kalman filter-based prediction for smooth tracking */
     predict() {
-      // Update motion history
-      // 更新运动历史
-      this.motionModel.positionHistory.push({ x: this.cx, y: this.cy, t: Date.now() });
-      this.motionModel.velocityHistory.push({ vx: this.vx, vy: this.vy, t: Date.now() });
-      
-      if (this.motionModel.positionHistory.length > this.motionModel.maxHistory) {
-        this.motionModel.positionHistory.shift();
-        this.motionModel.velocityHistory.shift();
-      }
-      
-      // Enhanced acceleration calculation with smoothing
-      // 增强的加速度计算，包含平滑处理
-      if (this.motionModel.velocityHistory.length >= 3) {
-        const recent = this.motionModel.velocityHistory.slice(-3);
-        let axSum = 0, aySum = 0, validSamples = 0;
+      if (this.useKalmanFilter && this.kalmanFilter) {
+        // Use Kalman filter for prediction
+        // 使用卡尔曼滤波器进行预测
+        const dt = 1/30; // Assume 30 FPS
+        this.kalmanFilter.predict(dt);
         
-        for (let i = 1; i < recent.length; i++) {
-          const dt = (recent[i].t - recent[i-1].t) / 1000;
-          if (dt > 0 && dt < 0.1) { // Valid time delta
-            axSum += (recent[i].vx - recent[i-1].vx) / dt;
-            aySum += (recent[i].vy - recent[i-1].vy) / dt;
-            validSamples++;
-          }
-        }
+        // Get predicted bbox from Kalman filter
+        // 从卡尔曼滤波器获取预测的边界框
+        const predictedBbox = this.kalmanFilter.getBbox();
+        const velocity = this.kalmanFilter.getVelocity();
         
-        if (validSamples > 0) {
-          // Smooth acceleration with exponential moving average
-          // 使用指数移动平均平滑加速度
-          const newAx = axSum / validSamples;
-          const newAy = aySum / validSamples;
-          const smoothingFactor = 0.3;
+        // Update track state with Kalman prediction
+        // 使用卡尔曼预测更新追踪状态
+        this.cx = predictedBbox.x + predictedBbox.w / 2;
+        this.cy = predictedBbox.y + predictedBbox.h / 2;
+        this.w = predictedBbox.w;
+        this.h = predictedBbox.h;
+        this.vx = velocity.vx;
+        this.vy = velocity.vy;
+        
+        // Handle occlusion state with Kalman confidence
+        // 使用卡尔曼置信度处理遮挡状态
+        const kalmanConfidence = this.kalmanFilter.getConfidence();
+        
+        if (this.occlusionState.isOccluded) {
+          // Adaptive search radius based on velocity
+          // 基于速度的自适应搜索半径
+          const velocityMagnitude = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+          const expansionRate = Math.min(1.05, 1.01 + velocityMagnitude / 200);
+          this.occlusionState.searchRadius *= expansionRate;
+          this.occlusionState.searchRadius = Math.min(this.occlusionState.searchRadius, 200);
           
-          this.motionModel.acceleration.ax = 
-            smoothingFactor * newAx + (1 - smoothingFactor) * this.motionModel.acceleration.ax;
-          this.motionModel.acceleration.ay = 
-            smoothingFactor * newAy + (1 - smoothingFactor) * this.motionModel.acceleration.ay;
+          // Confidence decay with Kalman confidence
+          // 结合卡尔曼置信度的置信度衰减
+          this.occlusionState.confidence *= (0.95 + kalmanConfidence * 0.03);
+          
+          // Store predicted position
+          // 存储预测位置
+          this.occlusionState.predictedPosition = { cx: this.cx, cy: this.cy };
+        } else {
+          // Update last known position when not occluded
+          // 未遮挡时更新最后已知位置
+          this.occlusionState.lastKnownPosition = { cx: this.cx, cy: this.cy };
+          this.occlusionState.confidence = Math.min(1.0, this.occlusionState.confidence + 0.1);
+          // Reset search radius when not occluded
+          // 未遮挡时重置搜索半径
+          this.occlusionState.searchRadius = Math.max(this.w, this.h) * 0.6;
         }
+        
+      } else {
+        // Fallback to legacy prediction method
+        // 回退到传统预测方法
+        this.legacyPredict();
       }
       
-      // Enhanced prediction with acceleration and confidence weighting
-      // 包含加速度和置信度权重的增强预测
-      const dt = 1/30; // Assume 30 FPS
-      const confidenceFactor = Math.min(1.0, this.hits / 15); // Build confidence over time
-      
-      // Apply acceleration only if we have sufficient confidence
-      // 仅在有足够置信度时应用加速度
-      const accelWeight = confidenceFactor * 0.5;
-      let xp = this.cx + this.vx * dt + accelWeight * this.motionModel.acceleration.ax * dt * dt;
-      let yp = this.cy + this.vy * dt + accelWeight * this.motionModel.acceleration.ay * dt * dt;
-      
-      // Update velocity with damped acceleration
-      // 使用阻尼加速度更新速度
-      const velocityDamping = this.locked ? 0.8 : 0.9; // More aggressive damping for locked tracks
-      this.vx = this.vx * velocityDamping + accelWeight * this.motionModel.acceleration.ax * dt;
-      this.vy = this.vy * velocityDamping + accelWeight * this.motionModel.acceleration.ay * dt;
-      
-      // Apply additional damping to prevent runaway
-      // 应用额外阻尼防止失控
+      this._pushTrajectory();
+    }
+    
+    /** Legacy prediction method as fallback */
+    legacyPredict() {
+      const dt = 1/30;
       const dampingFactor = this.occlusionState.isOccluded ? 0.92 : 0.96;
+      
+      let xp = this.cx + this.vx * dt;
+      let yp = this.cy + this.vy * dt;
+      
       this.vx *= dampingFactor;
       this.vy *= dampingFactor;
       
-      // Handle occlusion state with improved prediction
-      // 使用改进预测处理遮挡状态
-      if (this.occlusionState.isOccluded) {
-        // Adaptive search radius expansion
-        // 自适应搜索半径扩展
-        const expansionRate = Math.min(1.08, 1.02 + Math.sqrt(this.vx*this.vx + this.vy*this.vy) / 100);
-        this.occlusionState.searchRadius *= expansionRate;
-        this.occlusionState.searchRadius = Math.min(this.occlusionState.searchRadius, 250);
-        
-        // Confidence decay with velocity consideration
-        // 考虑速度的置信度衰减
-        const velocityMagnitude = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
-        const decayRate = velocityMagnitude > 20 ? 0.93 : 0.95; // Faster decay for fast-moving objects
-        this.occlusionState.confidence *= decayRate;
-        
-        // Store predicted position
-        // 存储预测位置
-        this.occlusionState.predictedPosition = { cx: xp, cy: yp };
-      } else {
-        // Update last known position when not occluded
-        // 未遮挡时更新最后已知位置
-        this.occlusionState.lastKnownPosition = { cx: this.cx, cy: this.cy };
-        this.occlusionState.confidence = Math.min(1.0, this.occlusionState.confidence + 0.15);
-        // Reset search radius when not occluded
-        // 未遮挡时重置搜索半径
-        this.occlusionState.searchRadius = Math.max(this.w, this.h) * 0.6;
-      }
-      
       this.cx = xp;
       this.cy = yp;
-      this._pushTrajectory();
+    }
+    
+    /** Legacy update method as fallback */
+    legacyUpdate(detBbox, wasOccluded) {
+      const zx = detBbox.x + detBbox.w / 2;
+      const zy = detBbox.y + detBbox.h / 2;
+      const xp = this.cx;
+      const yp = this.cy;
+      
+      const rx = zx - xp; 
+      const ry = zy - yp;
+      const innovationMagnitude = Math.sqrt(rx * rx + ry * ry);
+      
+      let adaptiveAlpha = this.alpha;
+      let adaptiveBeta = this.beta;
+      
+      if (wasOccluded) {
+        adaptiveAlpha = Math.min(0.9, this.alpha * 1.5);
+        adaptiveBeta = Math.min(0.5, this.beta * 1.2);
+        this.occlusionState.isOccluded = false;
+        this.occlusionState.searchRadius = Math.max(detBbox.w, detBbox.h) * 0.5;
+      } else if (innovationMagnitude > 50) {
+        adaptiveAlpha = Math.min(0.8, this.alpha * 1.2);
+        adaptiveBeta = Math.min(0.4, this.beta * 1.1);
+      }
+      
+      this.cx = xp + adaptiveAlpha * rx;
+      this.cy = yp + adaptiveAlpha * ry;
+      this.vx = this.vx + adaptiveBeta * rx;
+      this.vy = this.vy + adaptiveBeta * ry;
+      
+      const sizeWeight = Math.max(0.2, this.occlusionState.confidence * 0.4);
+      this.w = (1 - sizeWeight) * this.w + sizeWeight * detBbox.w;
+      this.h = (1 - sizeWeight) * this.h + sizeWeight * detBbox.h;
     }
 
     /** Enhanced update with occlusion recovery and appearance templates */
@@ -533,46 +557,38 @@
       const xp = this.cx;
       const yp = this.cy;
       
-      // Calculate innovation (measurement residual)
-      // 计算新息（测量残差）
-      const rx = zx - xp; 
-      const ry = zy - yp;
-      const innovationMagnitude = Math.sqrt(rx * rx + ry * ry);
-      
-      // Adaptive update gains based on innovation and occlusion state
-      // 基于新息和遮挡状态的自适应更新增益
-      let adaptiveAlpha = this.alpha;
-      let adaptiveBeta = this.beta;
-      
-      if (wasOccluded) {
-        // Higher gains for quick recovery from occlusion
-        // 遮挡恢复时使用更高增益
-        adaptiveAlpha = Math.min(0.9, this.alpha * 1.5);
-        adaptiveBeta = Math.min(0.5, this.beta * 1.2);
+      if (this.useKalmanFilter && this.kalmanFilter) {
+        // Use Kalman filter for update
+        // 使用卡尔曼滤波器进行更新
+        const confidence = wasOccluded ? 0.8 : 1.0; // Lower confidence if recovering from occlusion
+        this.kalmanFilter.update(detBbox, confidence);
         
-        // Reset occlusion state
-        // 重置遮挡状态
-        this.occlusionState.isOccluded = false;
-        this.occlusionState.searchRadius = Math.max(detBbox.w, detBbox.h) * 0.5;
-      } else if (innovationMagnitude > 50) {
-        // Large innovation suggests rapid movement, increase responsiveness
-        // 大的新息表明快速运动，增加响应性
-        adaptiveAlpha = Math.min(0.8, this.alpha * 1.2);
-        adaptiveBeta = Math.min(0.4, this.beta * 1.1);
+        // Get updated state from Kalman filter
+        // 从卡尔曼滤波器获取更新后的状态
+        const updatedBbox = this.kalmanFilter.getBbox();
+        const velocity = this.kalmanFilter.getVelocity();
+        
+        // Update track state
+        // 更新追踪状态
+        this.cx = updatedBbox.x + updatedBbox.w / 2;
+        this.cy = updatedBbox.y + updatedBbox.h / 2;
+        this.w = updatedBbox.w;
+        this.h = updatedBbox.h;
+        this.vx = velocity.vx;
+        this.vy = velocity.vy;
+        
+        // Reset occlusion state if recovering
+        // 如果从遮挡中恢复则重置遮挡状态
+        if (wasOccluded) {
+          this.occlusionState.isOccluded = false;
+          this.occlusionState.searchRadius = Math.max(detBbox.w, detBbox.h) * 0.5;
+        }
+        
+      } else {
+        // Fallback to legacy update method
+        // 回退到传统更新方法
+        this.legacyUpdate(detBbox, wasOccluded);
       }
-      
-      // State update
-      // 状态更新
-      this.cx = xp + adaptiveAlpha * rx;
-      this.cy = yp + adaptiveAlpha * ry;
-      this.vx = this.vx + adaptiveBeta * rx;
-      this.vy = this.vy + adaptiveBeta * ry;
-      
-      // Adaptive size smoothing based on confidence
-      // 基于置信度的自适应尺寸平滑
-      const sizeWeight = Math.max(0.2, this.occlusionState.confidence * 0.4);
-      this.w = (1 - sizeWeight) * this.w + sizeWeight * detBbox.w;
-      this.h = (1 - sizeWeight) * this.h + sizeWeight * detBbox.h;
       
       this.lostFrames = 0;
       this.hits += 1;
@@ -648,7 +664,7 @@
       }
     }
     
-    /** Enhanced appearance matching with ID consistency checks */
+    /** Enhanced appearance matching with strict ID consistency checks */
     getAppearanceMatchScore(feature, candidateDetection = null) {
       if (!feature || this.appearanceModel.templates.length === 0) return 0;
       
@@ -668,49 +684,84 @@
       const sortedSims = similarities.sort((a, b) => b.weightedSim - a.weightedSim);
       const bestMatch = sortedSims[0];
       const secondBest = sortedSims[1] || { weightedSim: 0 };
+      const thirdBest = sortedSims[2] || { weightedSim: 0 };
       
-      // Calculate discrimination ratio - higher is better for unique identification
-      // 计算区分比率 - 越高越有利于唯一识别
+      // Enhanced discrimination calculation using top-3 matches
+      // 使用前3个匹配的增强区分度计算
       const discriminationRatio = sortedSims.length > 1 ? 
         (bestMatch.weightedSim - secondBest.weightedSim) / (bestMatch.weightedSim + 1e-6) : 1.0;
       
-      // Base similarity score
-      // 基础相似度分数
+      const topThreeAvg = sortedSims.length >= 3 ? 
+        (bestMatch.weightedSim + secondBest.weightedSim + thirdBest.weightedSim) / 3 : 
+        (bestMatch.weightedSim + secondBest.weightedSim) / 2;
+      
+      const distinctiveness = bestMatch.weightedSim - topThreeAvg;
+      
+      // Base similarity score with stricter requirements
+      // 更严格要求的基础相似度分数
       const maxSimilarity = bestMatch.weightedSim;
       const avgSimilarity = similarities.reduce((sum, sim) => sum + sim.weightedSim, 0) / similarities.length;
-      const baseScore = 0.6 * maxSimilarity + 0.4 * avgSimilarity;
+      const baseScore = 0.7 * maxSimilarity + 0.3 * avgSimilarity; // Favor max similarity more
       
-      // Apply discrimination bonus for highly distinctive matches
-      // 对高区分度匹配应用奖励
-      const discriminationBonus = discriminationRatio > 0.3 ? discriminationRatio * 0.2 : 0;
+      // Enhanced discrimination bonus
+      // 增强的区分度奖励
+      let discriminationBonus = 0;
+      if (discriminationRatio > 0.25) {
+        discriminationBonus = discriminationRatio * 0.15;
+      }
+      if (distinctiveness > 0.1) {
+        discriminationBonus += distinctiveness * 0.1;
+      }
       
-      // Check consistency with recent matches for ID stability
-      // 检查与最近匹配的一致性以保持ID稳定性
-      let consistencyBonus = 0;
-      if (this.idConsistency.recentMatches.length > 0) {
-        const recentAvgSim = this.idConsistency.recentMatches
-          .slice(-3) // Last 3 matches
-          .reduce((sum, match) => sum + match.similarity, 0) / Math.min(3, this.idConsistency.recentMatches.length);
+      // Strict consistency checking for ID stability
+      // 严格的一致性检查以保持ID稳定性
+      let consistencyScore = 0;
+      if (this.idConsistency.recentMatches.length >= this.idConsistency.minMatchesForStability) {
+        const recentMatches = this.idConsistency.recentMatches.slice(-5); // Last 5 matches
+        const recentAvgSim = recentMatches.reduce((sum, match) => sum + match.similarity, 0) / recentMatches.length;
+        const recentStdDev = Math.sqrt(
+          recentMatches.reduce((sum, match) => sum + Math.pow(match.similarity - recentAvgSim, 2), 0) / recentMatches.length
+        );
         
-        // Bonus for consistency with recent successful matches
-        // 与最近成功匹配一致性的奖励
-        if (Math.abs(baseScore - recentAvgSim) < 0.2) {
-          consistencyBonus = 0.1;
+        // Strong consistency bonus for stable patterns
+        // 稳定模式的强一致性奖励
+        if (Math.abs(baseScore - recentAvgSim) < 0.15 && recentStdDev < 0.1) {
+          consistencyScore = this.idConsistency.stabilityBonus;
+        } else if (Math.abs(baseScore - recentAvgSim) > 0.3) {
+          // Penalty for inconsistent matches
+          // 不一致匹配的惩罚
+          consistencyScore = -this.idConsistency.switchPenalty;
         }
       }
       
-      const finalScore = Math.min(1.0, baseScore + discriminationBonus + consistencyBonus);
+      // Apply strict mode penalties if enabled
+      // 如果启用严格模式则应用惩罚
+      let strictModeAdjustment = 0;
+      if (this.appearanceModel.strictMode) {
+        if (maxSimilarity < 0.7) {
+          strictModeAdjustment = -0.2; // Penalty for low similarity
+        }
+        if (discriminationRatio < 0.2) {
+          strictModeAdjustment -= 0.15; // Penalty for low discrimination
+        }
+      }
+      
+      const finalScore = Math.max(0, Math.min(1.0, 
+        baseScore + discriminationBonus + consistencyScore + strictModeAdjustment
+      ));
       
       // Record this match for consistency tracking
       // 记录此匹配以进行一致性跟踪
       this.idConsistency.recentMatches.push({
         similarity: finalScore,
+        rawSimilarity: maxSimilarity,
+        discrimination: discriminationRatio,
         timestamp: Date.now(),
         templateIdx: bestMatch.templateIdx
       });
       
       // Maintain match history size
-      // 维护匹配历史大小
+      // 维持匹配历史大小
       if (this.idConsistency.recentMatches.length > this.idConsistency.maxMatchHistory) {
         this.idConsistency.recentMatches.shift();
       }
@@ -755,19 +806,19 @@
       this.maxLostUnlocked = opts.maxLostUnlocked ?? 30; // Reduced for efficiency
       this.maxLostLocked = opts.maxLostLocked ?? 120; // Increased for occlusion tolerance
       
-      // Enhanced matching weights for better tracking (tuned to reduce ID switches)
-      // 增强的匹配权重以减少ID切换
-      this.wIoU = opts.wIoU ?? 0.20;        // Slightly lower IoU weight
-      this.wApp = opts.wApp ?? 0.40;        // Higher appearance weight / 更高外观权重
-      this.wCtr = opts.wCtr ?? 0.22;        // Slightly higher center distance weight / 略高中心距离权重
-      this.wRatio = opts.wRatio ?? 0.05;    // Aspect ratio weight / 宽高比权重
-      this.wMotion = opts.wMotion ?? 0.18;  // Higher motion consistency weight / 更高运动一致性权重
+      // Optimized matching weights for ID consistency (heavily favor appearance)
+      // 针对ID一致性优化的匹配权重（重点关注外观）
+      this.wIoU = opts.wIoU ?? 0.10;        // Lower IoU weight to reduce geometric bias
+      this.wApp = opts.wApp ?? 0.55;        // Much higher appearance weight for ID stability
+      this.wCtr = opts.wCtr ?? 0.15;        // Moderate center distance weight
+      this.wRatio = opts.wRatio ?? 0.05;    // Minimal aspect ratio weight
+      this.wMotion = opts.wMotion ?? 0.15;  // Balanced motion consistency weight
       
-      // Adaptive cost thresholds for different scenarios (stricter defaults)
-      // 针对不同场景的自适应成本阈值（更严格的默认值）
-      this.costThreshold = opts.costThreshold ?? 0.70; // Base threshold / 基础阈值
-      this.crowdedSceneThreshold = opts.crowdedSceneThreshold ?? 0.60; // Crowded scenes / 密集场景
-      this.lockedTrackThreshold = opts.lockedTrackThreshold ?? 0.88; // Locked tracks acceptance / 锁定轨迹匹配阈值
+      // Stricter cost thresholds to prevent ID switches
+      // 更严格的成本阈值以防止ID切换
+      this.costThreshold = opts.costThreshold ?? 0.50; // Stricter base threshold
+      this.crowdedSceneThreshold = opts.crowdedSceneThreshold ?? 0.40; // Very strict for crowded scenes
+      this.lockedTrackThreshold = opts.lockedTrackThreshold ?? 0.75; // Stricter locked track threshold
       this.autoCreate = !!opts.autoCreate;
       
       // Occlusion handling parameters
@@ -1173,31 +1224,57 @@
           
           let cost = baseCost + idSwitchPenalty + trajConsistencyPenalty + sizeConsistencyPenalty;
 
-          // ---------------- Hard appearance/discrimination gate ----------------
-          // ---------------- 强外观/区分度门控 ----------------
+          // ---------------- Strict appearance gate for ID consistency ----------------
+          // ---------------- 严格的外观门控以保持ID一致性 ----------------
           if (this.enableReID && d.feature && trackList[ti]) {
             let appSim = 0;
             let discrRatio = 0;
+            let hasStrongMatch = false;
+            
             if (t.appearanceModel?.templates?.length > 0) {
-              // Recompute top-2 weighted similarities to estimate discrimination
-              // 重新计算前两名加权相似度以估计区分度
+              // Enhanced discrimination calculation
+              // 增强的区分度计算
               const sims = t.appearanceModel.templates.map((tpl, idx) => ({
-                sim: cosineSimilarity(d.feature, tpl) * (t.appearanceModel.weights[idx] || 0),
+                sim: cosineSimilarity(d.feature, tpl),
+                weightedSim: cosineSimilarity(d.feature, tpl) * (t.appearanceModel.weights[idx] || 0)
               }));
-              sims.sort((a, b) => b.sim - a.sim);
-              const s0 = sims[0]?.sim || 0;
-              const s1 = sims[1]?.sim || 0;
-              appSim = s0; // use top weighted sim as similarity proxy / 使用最高加权相似度作为代理
+              sims.sort((a, b) => b.weightedSim - a.weightedSim);
+              
+              const s0 = sims[0]?.weightedSim || 0;
+              const s1 = sims[1]?.weightedSim || 0;
+              const rawSim0 = sims[0]?.sim || 0;
+              
+              appSim = s0;
               discrRatio = s0 > 0 ? (s0 - s1) / (s0 + 1e-6) : 0;
+              hasStrongMatch = rawSim0 > 0.75; // Strong raw similarity
             } else if (t.feature) {
               appSim = cosineSimilarity(t.feature, d.feature);
-              discrRatio = 0; // no template set to estimate discrimination / 无法估计区分度
+              hasStrongMatch = appSim > 0.70;
+              discrRatio = 0;
             }
 
-            const minApp = isLockedPass ? 0.55 : 0.45;
-            const minDiscr = isLockedPass ? 0.15 : 0.10;
-            if (appSim < minApp || discrRatio < minDiscr) {
-              cost = maxCost; // reject weak/ambiguous appearance matches
+            // Stricter thresholds to prevent ID switches
+            // 更严格的阈值以防止ID切换
+            const minApp = isLockedPass ? 0.65 : 0.55; // Higher minimum appearance
+            const minDiscr = isLockedPass ? 0.20 : 0.15; // Higher discrimination requirement
+            
+            // Additional check for locked tracks with history
+            // 对有历史的锁定轨迹进行额外检查
+            if (isLockedPass && t.idConsistency.recentMatches.length >= t.idConsistency.minMatchesForStability) {
+              const recentAvgSim = t.idConsistency.recentMatches
+                .slice(-5)
+                .reduce((sum, match) => sum + match.similarity, 0) / Math.min(5, t.idConsistency.recentMatches.length);
+              
+              // Reject if significantly different from recent pattern
+              // 如果与最近模式显著不同则拒绝
+              if (Math.abs(appSim - recentAvgSim) > 0.25) {
+                cost = maxCost;
+                continue;
+              }
+            }
+            
+            if (appSim < minApp || (discrRatio < minDiscr && !hasStrongMatch)) {
+              cost = maxCost; // Reject weak/ambiguous appearance matches
             }
           }
 

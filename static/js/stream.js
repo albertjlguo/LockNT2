@@ -35,7 +35,7 @@ class StreamManager {
             focusClasses: ['person'],
             autoCreate: false
         });
-        this.detectEveryMs = 300; // Reduced detection frequency for locked targets 降低检测频率，锁定目标主要依赖追踪
+        this.detectEveryMs = 100; // Increased detection frequency for better responsiveness 提高检测频率以获得更好的响应性
         this.lastDetectionTime = 0;
         this.lastScaledPredictions = [];
         this.debug = false; // 控制调试日志开关
@@ -498,28 +498,14 @@ class StreamManager {
             return;
         }
         
-        // Smart detection throttling based on locked targets
-        // 基于锁定目标的智能检测节流
+        // Consistent detection frequency for better tracking accuracy
+        // 一致的检测频率以获得更好的追踪准确性
         const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
         const lockedTracks = this.tracker ? this.tracker.getTracks().filter(t => t.locked) : [];
         
-        // Adaptive detection frequency: slower when targets are locked and stable
-        // 自适应检测频率：锁定目标稳定时降低检测频率
+        // Use consistent detection interval for all scenarios
+        // 对所有场景使用一致的检测间隔
         let adaptiveDetectInterval = this.detectEveryMs;
-        if (lockedTracks.length > 0) {
-            const avgStability = lockedTracks.reduce((sum, t) => {
-                const stability = Math.min(1.0, (t.hits - t.lostFrames) / Math.max(1, t.hits));
-                return sum + stability;
-            }, 0) / lockedTracks.length;
-            
-            // Stable locked targets need less frequent detection
-            // 稳定的锁定目标需要更低频率的检测
-            if (avgStability > 0.8) {
-                adaptiveDetectInterval = this.detectEveryMs * 2; // 600ms for stable targets
-            } else if (avgStability > 0.6) {
-                adaptiveDetectInterval = this.detectEveryMs * 1.5; // 450ms for moderately stable
-            }
-        }
         
         const shouldDetect = !this.lastDetectionTime || (now - this.lastDetectionTime >= adaptiveDetectInterval);
 
@@ -529,12 +515,10 @@ class StreamManager {
             try {
                 if (this.tracker && this.tracker.getTracks().length > 0) {
                     this.tracker.predictOnly();
-                    // Only redraw if there are locked tracks to avoid unnecessary rendering
-                    // 仅在有锁定目标时重绘，避免不必要的渲染
-                    if (this.tracker.getTracks().some(t => t.locked)) {
-                        this.clearOverlay();
-                        this.drawTracks();
-                    }
+                    // Always redraw for smooth tracking visualization
+                    // 始终重绘以获得流畅的追踪可视化
+                    this.clearOverlay();
+                    this.drawTracks();
                 }
             } catch (e) {
                 console.warn('Predict-only step failed:', e);
@@ -546,55 +530,63 @@ class StreamManager {
             // 运行检测
             const predictions = await window.detectionManager.detectObjects(this.frameImage);
 
-            // 精确的坐标缩放处理，确保检测框与显示一致
-            // Precise coordinate scaling to ensure detection boxes match display
+            // Enhanced coordinate scaling with validation and clamping
+            // 增强的坐标缩放，包含验证和限制
             const imageWidth = this.frameImage?.naturalWidth || this.frameImage?.width || this.detectionCanvas.width;
             const imageHeight = this.frameImage?.naturalHeight || this.frameImage?.height || this.detectionCanvas.height;
             const scaleX = this.detectionCanvas.width / imageWidth;
             const scaleY = this.detectionCanvas.height / imageHeight;
             
-            console.log(`Scaling from ${imageWidth}x${imageHeight} to ${this.detectionCanvas.width}x${this.detectionCanvas.height}, factors: ${scaleX.toFixed(3)}, ${scaleY.toFixed(3)}`);
+            if (this.debug) {
+                console.log(`Scaling from ${imageWidth}x${imageHeight} to ${this.detectionCanvas.width}x${this.detectionCanvas.height}, factors: ${scaleX.toFixed(3)}, ${scaleY.toFixed(3)}`);
+            }
             
             const scaled = predictions.map(p => {
                 const [x, y, w, h] = p.bbox;
-                const scaledBbox = [x * scaleX, y * scaleY, w * scaleX, h * scaleY];
                 
-                // 验证缩放后的坐标是否合理
-                // Validate scaled coordinates are reasonable
-                if (scaledBbox[0] < 0 || scaledBbox[1] < 0 || 
-                    scaledBbox[0] + scaledBbox[2] > this.detectionCanvas.width ||
-                    scaledBbox[1] + scaledBbox[3] > this.detectionCanvas.height) {
-                    console.warn('Scaled bbox out of canvas bounds:', scaledBbox, 'Canvas:', this.detectionCanvas.width, 'x', this.detectionCanvas.height);
-                }
+                // Apply scaling with proper rounding to avoid sub-pixel issues
+                // 应用缩放并适当舍入以避免子像素问题
+                let scaledX = Math.round(x * scaleX);
+                let scaledY = Math.round(y * scaleY);
+                let scaledW = Math.round(w * scaleX);
+                let scaledH = Math.round(h * scaleY);
+                
+                // Clamp coordinates to canvas bounds
+                // 将坐标限制在画布范围内
+                scaledX = Math.max(0, Math.min(scaledX, this.detectionCanvas.width - 1));
+                scaledY = Math.max(0, Math.min(scaledY, this.detectionCanvas.height - 1));
+                scaledW = Math.max(1, Math.min(scaledW, this.detectionCanvas.width - scaledX));
+                scaledH = Math.max(1, Math.min(scaledH, this.detectionCanvas.height - scaledY));
+                
+                const scaledBbox = [scaledX, scaledY, scaledW, scaledH];
                 
                 return {
                     bbox: scaledBbox,
                     score: p.score,
                     class: p.class,
                     originalBbox: p.bbox, // 保留原始坐标用于调试
-                    scaleFactors: { x: scaleX, y: scaleY }
+                    scaleFactors: { x: scaleX, y: scaleY },
+                    imageSize: { width: imageWidth, height: imageHeight },
+                    canvasSize: { width: this.detectionCanvas.width, height: this.detectionCanvas.height }
                 };
             });
             this.lastScaledPredictions = scaled;
 
-            // Smart tracker update: locked targets use tracking-first mode
-            // 智能追踪器更新：锁定目标使用追踪优先模式
+            // Enhanced tracker update with improved association
+            // 增强的追踪器更新，改进关联算法
             if (this.tracker && this.videoContext) {
                 this.tracker.update(scaled, this.videoContext, {
-                    trackingFirstMode: true, // Prioritize tracking over detection for locked targets
-                    lockedTargetDetectionWeight: 0.3 // Reduce detection influence for locked targets
+                    enableStrictMatching: true, // Enable strict matching to reduce ID switches
+                    appearanceWeight: 0.6, // Increase appearance weight for better ID consistency
+                    motionWeight: 0.3, // Balanced motion weight
+                    iouWeight: 0.1 // Lower IoU weight to rely more on appearance
                 });
             }
 
-            // 仅绘制追踪框（不显示检测框），只在有锁定目标时重绘
-            // Only redraw tracking overlay when there are locked targets
-            if (this.tracker.getTracks().some(t => t.locked)) {
-                this.clearOverlay();
-                this.drawTracks();
-            } else {
-                // Clear overlay if no locked targets
-                this.clearOverlay();
-            }
+            // Always redraw tracking overlay for immediate visual feedback
+            // 始终重绘追踪覆盖层以获得即时视觉反馈
+            this.clearOverlay();
+            this.drawTracks();
 
             this.lastDetectionTime = now;
         } catch (error) {

@@ -13,12 +13,16 @@ class ObjectDetectionManager {
             recentDetections: []
         };
         
-        // Configurable confidence thresholds
-        // 可配置的置信度阈值
+        // Configurable confidence thresholds (lowered for better detection)
+        // 可配置的置信度阈值（降低以提高检测率）
         this.confidenceThresholds = {
-            person: 0.5,  // 50%
-            car: 0.5      // 50%
+            person: 0.35,  // 35% - Lower for better person detection
+            car: 0.4       // 40% - Slightly lower for cars
         };
+        
+        // Previous detections for temporal smoothing
+        // 用于时间平滑的先前检测
+        this.previousDetections = [];
         
         this.initializeConfidenceControls();
     }
@@ -119,8 +123,8 @@ class ObjectDetectionManager {
     }
 
     /**
-     * Enhanced object detection with improved coordinate handling
-     * 增强的目标检测，改进坐标处理
+     * Enhanced object detection with improved coordinate handling and temporal smoothing
+     * 增强的目标检测，改进坐标处理和时间平滑
      */
     async detectObjects(videoElement) {
         if (!this.isModelLoaded || !this.model) {
@@ -133,18 +137,20 @@ class ObjectDetectionManager {
             // 从 COCO-SSD 模型获取原始预测结果
             const rawPredictions = await this.model.detect(videoElement);
             
-            // Log detection info for debugging
-            // 记录检测信息用于调试
-            if (rawPredictions.length > 0) {
-                console.log(`Detected ${rawPredictions.length} objects on ${videoElement.naturalWidth || videoElement.width}x${videoElement.naturalHeight || videoElement.height} image`);
-            }
-            
             // Apply bounding box refinement and filtering
             // 应用边界框优化和过滤
             const refinedPredictions = this.refineBoundingBoxes(rawPredictions, videoElement);
             
-            this.processDetections(refinedPredictions);
-            return refinedPredictions;
+            // Apply temporal smoothing to reduce jitter
+            // 应用时间平滑以减少抖动
+            const smoothedPredictions = this.applyTemporalSmoothing(refinedPredictions, this.previousDetections);
+            
+            // Store for next frame smoothing
+            // 存储用于下一帧平滑
+            this.previousDetections = smoothedPredictions;
+            
+            this.processDetections(smoothedPredictions);
+            return smoothedPredictions;
         } catch (error) {
             console.error('Error during object detection:', error);
             return [];
@@ -171,9 +177,14 @@ class ObjectDetectionManager {
                 return null;
             }
             
-            // Apply class-specific confidence filtering
-            // 应用针对类别的置信度过滤
-            const minConfidence = this.confidenceThresholds[pred.class] || 0.3;
+            // Apply class-specific confidence filtering with dynamic thresholds
+            // 应用针对类别的动态置信度过滤
+            const baseConfidence = this.confidenceThresholds[pred.class] || 0.3;
+            // Lower threshold for small objects to improve detection
+            const objectSize = pred.bbox[2] * pred.bbox[3];
+            const sizeAdjustment = objectSize < 5000 ? -0.05 : 0; // Lower threshold for small objects
+            const minConfidence = Math.max(0.2, baseConfidence + sizeAdjustment);
+            
             if (pred.score < minConfidence) return null;
             
             // Validate original bbox coordinates
@@ -192,8 +203,8 @@ class ObjectDetectionManager {
                 pred.bbox = clampedBbox;
             }
             
-            // Apply conservative bounding box optimization
-            // 应用保守的边界框优化
+            // Apply minimal bounding box optimization to preserve accuracy
+            // 应用最小边界框优化以保持准确性
             const refinedBbox = this.optimizeBoundingBox(pred.bbox, pred.class, pred.score);
             
             // Final coordinate validation after optimization
@@ -233,29 +244,29 @@ class ObjectDetectionManager {
             return bbox; // Return original if invalid
         }
         
-        // Conservative adjustments to maintain accuracy
-        // 保守的调整以维持准确性
+        // Minimal adjustments to preserve detection accuracy
+        // 最小调整以保持检测准确性
         let adjustmentFactor = 1.0;
-        let paddingRatio = 0.02; // Reduced padding for better accuracy
+        let paddingRatio = 0.0; // No padding to maintain exact coordinates
         
         switch (objectClass) {
             case 'person':
-                // Minimal adjustment for persons to maintain detection accuracy
-                // 对人物进行最小调整以维持检测准确性
-                adjustmentFactor = confidence > 0.8 ? 0.98 : 1.0;
-                paddingRatio = 0.01;
+                // No adjustment for persons to maintain exact detection
+                // 对人物不进行调整以维持精确检测
+                adjustmentFactor = 1.0;
+                paddingRatio = 0.0;
                 break;
             case 'car':
-                // Slight tightening for cars only when high confidence
-                // 仅在高置信度时对汽车进行轻微收紧
-                adjustmentFactor = confidence > 0.8 ? 0.97 : 1.0;
-                paddingRatio = 0.015;
+                // No adjustment for cars to maintain exact detection
+                // 对汽车不进行调整以维持精确检测
+                adjustmentFactor = 1.0;
+                paddingRatio = 0.0;
                 break;
             default:
-                // No adjustment for unknown classes
-                // 未知类别不进行调整
+                // No adjustment for any classes
+                // 对任何类别都不进行调整
                 adjustmentFactor = 1.0;
-                paddingRatio = 0.01;
+                paddingRatio = 0.0;
         }
         
         // Apply conservative adjustments
