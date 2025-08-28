@@ -213,7 +213,7 @@ class StreamProcessor:
                         
                         # Adaptive frame rate control for smoother streaming
                         # 自适应帧率控制以提升流畅度
-                        target_fps = 30  # Reduced from 60 for better stability
+                        target_fps = 24  # Adjusted from 30 for user request
                         frame_time = 1.0 / target_fps
                         processing_time = time.time() - now
                         sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep

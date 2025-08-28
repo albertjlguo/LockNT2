@@ -32,7 +32,7 @@ class StreamManager {
             focusClasses: ['person'],
             autoCreate: false
         });
-        this.detectEveryMs = 300; // Reduced detection frequency for locked targets 降低检测频率，锁定目标主要依赖追踪
+        this.detectEveryMs = 500; // Adjusted from 300ms for user request
         this.lastDetectionTime = 0;
         this.lastScaledPredictions = [];
         this.debug = false; // 控制调试日志开关
