@@ -15,19 +15,15 @@ class StreamProcessor:
         self.youtube_url = youtube_url
         self.cap = None
         self.is_running = True  # Set to True initially
-        self.latest_frame = None
         self.frame_count = 0
         self.fps = 0
-        # FPS measurement window state
-        # FPS 计算使用滑动窗口统计
         self._fps_window_start = time.time()
         self._fps_window_count = 0
-        self.lock = threading.Lock()
-        
-        # Frame buffer for smoother streaming
-        # 帧缓冲区以实现更流畅的流媒体传输
-        self.frame_buffer = deque(maxlen=3)  # Small buffer to reduce latency
-        self.buffer_lock = threading.Lock()
+
+        # Dedicated, low-contention frame slot for MJPEG streaming
+        # 用于 MJPEG 流的专用、低竞争的帧槽
+        self._mjpeg_frame = None
+        self._mjpeg_lock = threading.Lock()
         
         # Performance monitoring
         # 性能监控
@@ -191,20 +187,10 @@ class StreamProcessor:
                             logging.warning("Failed to encode frame as JPEG")
                             continue
                         
-                        # Store frame in buffer for smoother delivery
-                        # 将帧存储在缓冲区中以实现更流畅的传输
-                        frame_data = buffer.tobytes()
-                        with self.buffer_lock:
-                            self.frame_buffer.append({
-                                'data': frame_data,
-                                'timestamp': time.time(),
-                                'frame_id': self.frame_count
-                            })
-                        
-                        # Also update latest frame for compatibility
-                        # 同时更新最新帧以保持兼容性
-                        with self.lock:
-                            self.latest_frame = frame_data
+                        # Put the latest encoded frame in the dedicated MJPEG slot
+                        # 将最新编码的帧放入专用的 MJPEG 槽中
+                        with self._mjpeg_lock:
+                            self._mjpeg_frame = buffer.tobytes()
                         
                         # Track processing performance
                         # 跟踪处理性能
@@ -253,36 +239,12 @@ class StreamProcessor:
         logging.info("Stream processing stopped")
     
     def get_latest_frame(self):
-        """Get the latest processed frame with buffer optimization.
-        获取最新处理的帧，使用缓冲区优化。
+        """Get the latest JPEG frame for MJPEG streaming.
+        获取用于 MJPEG 流的最新 JPEG 帧。
         """
-        with self.buffer_lock:
-            if self.frame_buffer:
-                # Return the most recent frame from buffer
-                # 从缓冲区返回最新帧
-                return self.frame_buffer[-1]['data']
-        
-        # Fallback to direct frame access
-        # 回退到直接帧访问
-        with self.lock:
-            return self.latest_frame
+        with self._mjpeg_lock:
+            return self._mjpeg_frame
     
-    def get_buffered_frame(self, max_age_ms=100):
-        """Get a frame from buffer that's not too old.
-        从缓冲区获取不太旧的帧。
-        """
-        current_time = time.time()
-        with self.buffer_lock:
-            # Find the newest frame that's not too old
-            # 找到不太旧的最新帧
-            for frame_info in reversed(self.frame_buffer):
-                age_ms = (current_time - frame_info['timestamp']) * 1000
-                if age_ms <= max_age_ms:
-                    return frame_info['data']
-        
-        # If no recent frame, return the latest available
-        # 如果没有最近的帧，返回最新可用的
-        return self.get_latest_frame()
     
     def get_performance_stats(self):
         """Get performance statistics.
@@ -295,7 +257,7 @@ class StreamProcessor:
         return {
             'avg_processing_time': avg_time * 1000,  # Convert to ms
             'dropped_frames': self.dropped_frames,
-            'buffer_size': len(self.frame_buffer)
+            'buffer_size': 1 if self._mjpeg_frame else 0
         }
     
     def stop(self):
@@ -311,9 +273,5 @@ class StreamProcessor:
             self.cap.release()
             self.cap = None
         
-        # Clear frame buffer
-        # 清空帧缓冲区
-        with self.buffer_lock:
-            self.frame_buffer.clear()
         
         logging.info("Stream processor cleaned up")

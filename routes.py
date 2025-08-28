@@ -118,59 +118,32 @@ def video_feed_mjpeg():
 
     def generate():
         boundary = "frame"
-        last_frame_id = -1
-        frame_skip_count = 0
-        max_skip_frames = 2  # Skip at most 2 frames to maintain smoothness
-        
+        last_frame_sent = None
+
         while is_processing and stream_processor:
             try:
-                # Use buffered frame with age limit for smoother delivery
-                # 使用带年龄限制的缓冲帧以实现更流畅的传输
-                frame = stream_processor.get_buffered_frame(max_age_ms=50)
-                current_frame_id = stream_processor.frame_count if stream_processor else last_frame_id
+                frame = stream_processor.get_latest_frame()
+
+                # Send frame only if it's new to avoid redundant transmissions
+                # 仅当帧为新时才发送，以避免冗余传输
+                if frame is not None and frame != last_frame_sent:
+                    last_frame_sent = frame
+                    yield (
+                        b"--" + boundary.encode() + b"\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + 
+                        frame + b"\r\n"
+                    )
                 
-                # Implement adaptive frame skipping to maintain target frame rate
-                # 实现自适应跳帧以保持目标帧率
-                if frame is not None and current_frame_id != last_frame_id:
-                    # Check if we should skip this frame to maintain smooth playback
-                    # 检查是否应跳过此帧以保持流畅播放
-                    frame_gap = current_frame_id - last_frame_id
-                    if frame_gap > 1 and frame_skip_count < max_skip_frames:
-                        frame_skip_count += 1
-                        # Remove blocking sleep to prevent worker timeout
-                        # 移除阻塞性sleep以防止worker超时
-                        continue
-                    
-                    frame_skip_count = 0
-                    last_frame_id = current_frame_id
-                    
-                    # Enhanced MJPEG headers with performance optimizations
-                    # 增强的MJPEG头部，包含性能优化
-                    timestamp = str(int(time.time() * 1000))
-                    yield (b"--" + boundary.encode() + b"\r\n"
-                           b"Content-Type: image/jpeg\r\n"
-                           b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
-                           b"Pragma: no-cache\r\n"
-                           b"Expires: 0\r\n"
-                           b"X-Timestamp: " + timestamp.encode() + b"\r\n"
-                           b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
-                           b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
-                else:
-                    # Non-blocking frame waiting - yield control instead of sleep
-                    # 非阻塞帧等待 - 让出控制权而非休眠
-                    # Use a very short yield to prevent busy waiting while avoiding worker timeout
-                    # 使用极短的让出以防止忙等待，同时避免worker超时
-                    import threading
-                    threading.Event().wait(0.001)  # Non-blocking minimal wait
-                    
+                # Control the stream's frame rate to about 30 FPS
+                # 将流的帧率控制在约 30 FPS
+                time.sleep(1 / 30)
+
             except GeneratorExit:
                 break
             except Exception as e:
-                logging.error(f"Error in enhanced MJPEG generator: {e}")
-                # Use non-blocking recovery pause to prevent worker timeout
-                # 使用非阻塞恢复暂停以防止worker超时
-                import threading
-                threading.Event().wait(0.005)  # Brief non-blocking recovery pause
+                logging.error(f"Error in MJPEG generator: {e}")
+                time.sleep(0.1)  # Sleep longer on error
 
     return Response(generate(), 
                     mimetype='multipart/x-mixed-replace; boundary=frame',
