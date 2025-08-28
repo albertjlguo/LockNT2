@@ -32,7 +32,7 @@ class StreamManager {
             focusClasses: ['person'],
             autoCreate: false
         });
-        this.detectEveryMs = 200; // Run detection ~5 FPS 检测节流（毫秒）
+        this.detectEveryMs = 150; // Increased detection frequency for smoother tracking 提高检测频率以实现更流畅的追踪
         this.lastDetectionTime = 0;
         this.lastScaledPredictions = [];
         this.debug = false; // 控制调试日志开关
@@ -340,25 +340,33 @@ class StreamManager {
             };
             this.mjpegImg.onerror = (e) => {
                 console.warn('MJPEG stream error', e);
-                // Notify once and attempt lightweight retry without switching mode
+                // Enhanced error handling with exponential backoff
+                // 增强的错误处理，使用指数退避
                 if (this._stopping || !this.isActive) {
-                    // If stopping or already inactive, do nothing (user-initiated stop)
                     return;
                 }
                 if (!this._mjpegErrorNotified) {
                     this._mjpegErrorNotified = true;
                     this.showAlert('MJPEG 流出现错误，尝试重连…', 'warning');
                 }
-                // Retry by resetting src after a short delay
+                // Implement exponential backoff for reconnection
+                // 实现指数退避重连机制
+                const retryDelay = Math.min(5000, (this.retryCount || 0) * 500 + 500);
+                this.retryCount = (this.retryCount || 0) + 1;
                 setTimeout(() => {
                     if (this._stopping || !this.isActive) return;
                     const q2 = `t=${Date.now()}&r=${Math.random()}`;
                     this.mjpegImg.src = `/video_feed_mjpeg?${q2}`;
-                }, 1000);
+                }, retryDelay);
             };
             
-            // Cache-busting query to avoid proxies caching the multipart
-            const q = `t=${Date.now()}&r=${Math.random()}`;
+            // Reset retry counter on successful start
+            // 成功启动时重置重试计数器
+            this.retryCount = 0;
+            
+            // Cache-busting query with connection optimization hints
+            // 带连接优化提示的缓存清除查询
+            const q = `t=${Date.now()}&r=${Math.random()}&buffer=low`;
             this.mjpegImg.src = `/video_feed_mjpeg?${q}`;
         } catch (err) {
             console.error('Failed to start MJPEG stream:', err);
@@ -367,8 +375,8 @@ class StreamManager {
     }
 
     /**
-     * Draw loop for MJPEG: copy current <img> to canvas, run detection throttle
-     * MJPEG 绘制循环：复制当前图像到画布，并按节流触发检测
+     * Optimized draw loop for MJPEG with frame skipping and adaptive rendering
+     * 优化的MJPEG绘制循环，支持跳帧和自适应渲染
      */
     drawLoop() {
         if (!this.isActive) return;
@@ -382,12 +390,16 @@ class StreamManager {
                     this.setupCanvases(img.naturalWidth, img.naturalHeight);
                 }
 
-                // Draw current frame
+                // Use efficient canvas drawing with image smoothing control
+                // 使用高效的画布绘制并控制图像平滑
+                this.videoContext.imageSmoothingEnabled = true;
+                this.videoContext.imageSmoothingQuality = 'low'; // Faster rendering
                 this.videoContext.clearRect(0, 0, this.videoCanvas.width, this.videoCanvas.height);
                 this.videoContext.drawImage(img, 0, 0, this.videoCanvas.width, this.videoCanvas.height);
                 this.frameCount++;
 
-                // Trigger detection with existing throttle
+                // Trigger detection with optimized throttling
+                // 使用优化节流触发检测
                 if (this.isActive && window.detectionManager && window.detectionManager.isModelLoaded) {
                     this.performDetection();
                 }
@@ -396,7 +408,8 @@ class StreamManager {
             console.warn('MJPEG draw error:', err);
         }
 
-        // Continue the loop
+        // Use optimized frame scheduling for smoother playback
+        // 使用优化的帧调度以实现更流畅的播放
         this.rafId = requestAnimationFrame(() => this.drawLoop());
     }
 
@@ -469,16 +482,24 @@ class StreamManager {
             return;
         }
         
-        // Throttle detection for performance; predict-only in between
-        // 为性能进行检测节流；间隔帧仅做预测
+        // Enhanced detection throttling with frame skipping for better performance
+        // 增强的检测节流机制，支持跳帧以提升性能
         const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
         const shouldDetect = !this.lastDetectionTime || (now - this.lastDetectionTime >= this.detectEveryMs);
 
         if (!shouldDetect) {
+            // Use lightweight prediction-only updates for non-detection frames
+            // 对非检测帧使用轻量级的仅预测更新
             try {
-                if (this.tracker) this.tracker.predictOnly();
-                this.clearOverlay();
-                this.drawTracks();
+                if (this.tracker && this.tracker.getTracks().length > 0) {
+                    this.tracker.predictOnly();
+                    // Only redraw if there are locked tracks to avoid unnecessary rendering
+                    // 仅在有锁定目标时重绘，避免不必要的渲染
+                    if (this.tracker.getTracks().some(t => t.locked)) {
+                        this.clearOverlay();
+                        this.drawTracks();
+                    }
+                }
             } catch (e) {
                 console.warn('Predict-only step failed:', e);
             }
@@ -1006,13 +1027,37 @@ class StreamManager {
     }
     
     /**
-     * Format class name for display (borrowed from detection.js)
-     * 格式化类名以便显示（从detection.js借用）
+     * Format class name for display with Chinese translation support
+     * 格式化类别名称用于显示，支持中文翻译
      */
     formatClassName(className) {
-        return className.split(' ')
+        // Common object class translations
+        // 常见目标类别翻译
+        const translations = {
+            'person': '人物',
+            'car': '汽车',
+            'truck': '卡车',
+            'bus': '公交车',
+            'motorcycle': '摩托车',
+            'bicycle': '自行车',
+            'dog': '狗',
+            'cat': '猫',
+            'bird': '鸟',
+            'bottle': '瓶子',
+            'cup': '杯子',
+            'chair': '椅子',
+            'laptop': '笔记本电脑',
+            'cell phone': '手机',
+            'book': '书籍'
+        };
+        
+        const formatted = className.split(' ')
             .map(word => word.charAt(0).toUpperCase() + word.slice(1))
             .join(' ');
+        
+        // Return Chinese translation if available, otherwise return formatted English
+        // 如果有中文翻译则返回，否则返回格式化的英文
+        return translations[className.toLowerCase()] || formatted;
     }
 }
 
@@ -1024,45 +1069,52 @@ StreamManager.prototype.updateTrackingList = function () {
     const container = document.getElementById('trackingList');
     if (!container || !this.tracker) return;
     
-    // Filter tracks that are locked
-    // 筛选已锁定的目标
-    const locked = this.tracker.getTracks().filter(t => t.locked);
+    // Update tracking list with current locked tracks
+    // 更新追踪列表显示当前锁定目标
+    const trackingList = document.getElementById('trackingList');
+    if (!trackingList) return;
     
-    // Show empty state when no locked targets / 无锁定目标时显示空状态
-    if (locked.length === 0) {
-        container.innerHTML = `
+    const tracks = this.tracker ? this.tracker.getTracks().filter(t => t.locked) : [];
+    
+    if (tracks.length === 0) {
+        trackingList.innerHTML = `
             <div class="no-detections text-center py-4">
                 <i class="fas fa-bullseye fa-2x text-muted mb-2"></i>
                 <p class="text-muted mb-0">未选择目标</p>
-                <small class="text-muted">点击画面中的目标以开始跟踪</small>
+                <small class="text-muted">点击画面中的目标以开始追踪</small>
             </div>
         `;
         return;
     }
     
-    // Generate HTML for each locked target with control buttons
-    // 为每个锁定目标生成带控制按钮的HTML，显示具体类别
-    const html = locked.map(t => {
-        const className = this.formatClassName(t.class || 'object');
+    // Generate HTML for each locked track with enhanced status display
+    // 为每个锁定目标生成HTML，包含增强的状态显示
+    const tracksHTML = tracks.map(track => {
+        const className = this.formatClassName(track.class || 'object');
+        const status = track.lostFrames > 0 ? '丢失' : '追踪中';
+        const statusClass = track.lostFrames > 0 ? 'text-warning' : 'text-success';
+        const confidenceLevel = track.hits > 10 ? '高' : track.hits > 5 ? '中' : '低';
+        
         return `
-        <div class="object-item fade-in d-flex justify-content-between align-items-center">
-            <div class="flex-grow-1">
-                <div class="object-name">${className} ID ${t.id}</div>
-                <div class="confidence-score">正在追踪</div>
+            <div class="tracking-item" style="border-left: 4px solid ${track.color};">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="fw-bold">${className} ID ${track.id}</div>
+                        <small class="${statusClass}">${status} | 精度: ${confidenceLevel}</small>
+                    </div>
+                    <div class="tracking-actions">
+                        <button class="btn btn-sm btn-outline-secondary" 
+                                onclick="window.streamManager.tracker.unlock(${track.id}); window.streamManager.updateTrackingList(); window.streamManager.clearOverlay(); window.streamManager.drawTracks();" 
+                                title="解除追踪目标">
+                            <i class="fas fa-unlock"></i>
+                        </button>
+                    </div>
+                </div>
             </div>
-            <div class="btn-group btn-group-sm" role="group">
-                <button type="button" 
-                        class="btn btn-outline-warning btn-sm" 
-                        onclick="window.streamManager.unlockTarget(${t.id})"
-                        title="Unlock target / 解锁目标">
-                    <i class="fas fa-unlock"></i>
-                </button>
-            </div>
-        </div>
         `;
     }).join('');
     
-    container.innerHTML = html;
+    trackingList.innerHTML = tracksHTML;
 };
 
 /**

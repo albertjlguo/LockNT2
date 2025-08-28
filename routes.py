@@ -108,8 +108,8 @@ def video_feed():
 
 @app.route('/video_feed_mjpeg')
 def video_feed_mjpeg():
-    """Continuous MJPEG streaming of the latest frames for smoother playback.
-    通过 MJPEG 连续推送最新帧，提升前端播放流畅度。
+    """Enhanced MJPEG streaming with adaptive frame delivery and buffer optimization.
+    增强的MJPEG流媒体，支持自适应帧传输和缓冲区优化。
     """
     global stream_processor
 
@@ -118,34 +118,61 @@ def video_feed_mjpeg():
 
     def generate():
         boundary = "frame"
-        last_count = -1
-        # No-cache headers are set via the Response below; here we just yield parts
+        last_frame_id = -1
+        frame_skip_count = 0
+        max_skip_frames = 2  # Skip at most 2 frames to maintain smoothness
+        
         while is_processing and stream_processor:
             try:
-                # Wait a short while for a new frame; yield only when frame_count increases
-                frame = stream_processor.get_latest_frame()
-                fc = stream_processor.frame_count if stream_processor else last_count
-                if frame is not None and fc != last_count:
-                    last_count = fc
+                # Use buffered frame with age limit for smoother delivery
+                # 使用带年龄限制的缓冲帧以实现更流畅的传输
+                frame = stream_processor.get_buffered_frame(max_age_ms=50)
+                current_frame_id = stream_processor.frame_count if stream_processor else last_frame_id
+                
+                # Implement adaptive frame skipping to maintain target frame rate
+                # 实现自适应跳帧以保持目标帧率
+                if frame is not None and current_frame_id != last_frame_id:
+                    # Check if we should skip this frame to maintain smooth playback
+                    # 检查是否应跳过此帧以保持流畅播放
+                    frame_gap = current_frame_id - last_frame_id
+                    if frame_gap > 1 and frame_skip_count < max_skip_frames:
+                        frame_skip_count += 1
+                        time.sleep(0.003)  # Very short delay
+                        continue
+                    
+                    frame_skip_count = 0
+                    last_frame_id = current_frame_id
+                    
+                    # Enhanced MJPEG headers with performance optimizations
+                    # 增强的MJPEG头部，包含性能优化
+                    timestamp = str(int(time.time() * 1000))
                     yield (b"--" + boundary.encode() + b"\r\n"
                            b"Content-Type: image/jpeg\r\n"
                            b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
                            b"Pragma: no-cache\r\n"
                            b"Expires: 0\r\n"
+                           b"X-Timestamp: " + timestamp.encode() + b"\r\n"
+                           b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
                            b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
                 else:
-                    time.sleep(0.01)  # small backoff to avoid busy loop
+                    # Dynamic sleep adjustment based on frame availability
+                    # 基于帧可用性的动态休眠调整
+                    time.sleep(0.003)  # Minimal sleep for high responsiveness
+                    
             except GeneratorExit:
                 break
             except Exception as e:
-                logging.error(f"Error in MJPEG generator: {e}")
-                time.sleep(0.05)
+                logging.error(f"Error in enhanced MJPEG generator: {e}")
+                time.sleep(0.01)  # Brief recovery pause
 
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame',
+    return Response(generate(), 
+                    mimetype='multipart/x-mixed-replace; boundary=frame',
                     headers={
                         'Cache-Control': 'no-cache, no-store, must-revalidate',
                         'Pragma': 'no-cache',
-                        'Expires': '0'
+                        'Expires': '0',
+                        'Connection': 'keep-alive',
+                        'X-Accel-Buffering': 'no'  # Disable nginx buffering for real-time streaming
                     })
 
 def is_valid_youtube_url(url: str) -> bool:

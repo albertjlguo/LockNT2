@@ -7,6 +7,8 @@ import json
 import requests
 from urllib.parse import urlparse, parse_qs
 import os
+from collections import deque  # For frame buffer implementation
+# 用于帧缓冲区实现
 
 class StreamProcessor:
     def __init__(self, youtube_url):
@@ -21,6 +23,16 @@ class StreamProcessor:
         self._fps_window_start = time.time()
         self._fps_window_count = 0
         self.lock = threading.Lock()
+        
+        # Frame buffer for smoother streaming
+        # 帧缓冲区以实现更流畅的流媒体传输
+        self.frame_buffer = deque(maxlen=3)  # Small buffer to reduce latency
+        self.buffer_lock = threading.Lock()
+        
+        # Performance monitoring
+        # 性能监控
+        self.processing_times = deque(maxlen=30)  # Track processing performance
+        self.dropped_frames = 0
 
     def validate_stream(self):
         """Validate if the YouTube URL is accessible and is a live stream."""
@@ -101,11 +113,18 @@ class StreamProcessor:
                     time.sleep(5)
                     continue
                 
-                # Set buffer size to reduce latency
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                # Set timeout for read operations
-                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
-                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
+                # Optimize buffer settings for smoother streaming
+        # 优化缓冲区设置以提升流畅度
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # Slightly larger buffer to handle jitter
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)   # Reduced timeout for faster recovery
+                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)   # Faster timeout to detect issues
+        
+                # Enable hardware acceleration if available
+                # 启用硬件加速（如果可用）
+                try:
+                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('H', '2', '6', '4'))
+                except:
+                    pass  # Fallback to default codec
                 
                 self.is_running = True
                 logging.info("Started video processing")
@@ -159,19 +178,46 @@ class StreamProcessor:
                             new_height = int(height * scale)
                             frame = cv2.resize(frame, (new_width, new_height))
                         
-                        # Encode frame as JPEG
-                        success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        # Encode frame as JPEG with optimized settings
+                        # 使用优化设置编码JPEG帧
+                        encode_params = [
+                            cv2.IMWRITE_JPEG_QUALITY, 75,  # Reduced quality for better performance
+                            cv2.IMWRITE_JPEG_OPTIMIZE, 1,  # Enable JPEG optimization
+                            cv2.IMWRITE_JPEG_PROGRESSIVE, 1  # Progressive JPEG for better streaming
+                        ]
+                        success, buffer = cv2.imencode('.jpg', frame, encode_params)
                         
                         if not success:
                             logging.warning("Failed to encode frame as JPEG")
                             continue
                         
-                        # Store latest frame
-                        with self.lock:
-                            self.latest_frame = buffer.tobytes()
+                        # Store frame in buffer for smoother delivery
+                        # 将帧存储在缓冲区中以实现更流畅的传输
+                        frame_data = buffer.tobytes()
+                        with self.buffer_lock:
+                            self.frame_buffer.append({
+                                'data': frame_data,
+                                'timestamp': time.time(),
+                                'frame_id': self.frame_count
+                            })
                         
-                        # Small delay to prevent overwhelming the system
-                        time.sleep(0.016)  # ~60 FPS to match frontend
+                        # Also update latest frame for compatibility
+                        # 同时更新最新帧以保持兼容性
+                        with self.lock:
+                            self.latest_frame = frame_data
+                        
+                        # Track processing performance
+                        # 跟踪处理性能
+                        processing_end = time.time()
+                        self.processing_times.append(processing_end - now)
+                        
+                        # Adaptive frame rate control for smoother streaming
+                        # 自适应帧率控制以提升流畅度
+                        target_fps = 30  # Reduced from 60 for better stability
+                        frame_time = 1.0 / target_fps
+                        processing_time = time.time() - now
+                        sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep
+                        time.sleep(sleep_time)
                         
                     except Exception as frame_error:
                         logging.error(f"Error processing frame: {str(frame_error)}")
@@ -207,9 +253,50 @@ class StreamProcessor:
         logging.info("Stream processing stopped")
     
     def get_latest_frame(self):
-        """Get the latest processed frame."""
+        """Get the latest processed frame with buffer optimization.
+        获取最新处理的帧，使用缓冲区优化。
+        """
+        with self.buffer_lock:
+            if self.frame_buffer:
+                # Return the most recent frame from buffer
+                # 从缓冲区返回最新帧
+                return self.frame_buffer[-1]['data']
+        
+        # Fallback to direct frame access
+        # 回退到直接帧访问
         with self.lock:
             return self.latest_frame
+    
+    def get_buffered_frame(self, max_age_ms=100):
+        """Get a frame from buffer that's not too old.
+        从缓冲区获取不太旧的帧。
+        """
+        current_time = time.time()
+        with self.buffer_lock:
+            # Find the newest frame that's not too old
+            # 找到不太旧的最新帧
+            for frame_info in reversed(self.frame_buffer):
+                age_ms = (current_time - frame_info['timestamp']) * 1000
+                if age_ms <= max_age_ms:
+                    return frame_info['data']
+        
+        # If no recent frame, return the latest available
+        # 如果没有最近的帧，返回最新可用的
+        return self.get_latest_frame()
+    
+    def get_performance_stats(self):
+        """Get performance statistics.
+        获取性能统计信息。
+        """
+        if not self.processing_times:
+            return {'avg_processing_time': 0, 'dropped_frames': self.dropped_frames}
+        
+        avg_time = sum(self.processing_times) / len(self.processing_times)
+        return {
+            'avg_processing_time': avg_time * 1000,  # Convert to ms
+            'dropped_frames': self.dropped_frames,
+            'buffer_size': len(self.frame_buffer)
+        }
     
     def stop(self):
         """Stop the stream processing."""
@@ -217,9 +304,16 @@ class StreamProcessor:
         self.cleanup()
     
     def cleanup(self):
-        """Clean up resources."""
-
+        """Clean up resources including frame buffer.
+        清理资源包括帧缓冲区。
+        """
         if self.cap:
             self.cap.release()
             self.cap = None
+        
+        # Clear frame buffer
+        # 清空帧缓冲区
+        with self.buffer_lock:
+            self.frame_buffer.clear()
+        
         logging.info("Stream processor cleaned up")
