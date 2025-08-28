@@ -8,24 +8,26 @@ import requests
 from urllib.parse import urlparse, parse_qs
 import os
 from collections import deque  # For frame buffer implementation
-import yt_dlp  # For YouTube-DL functionality
 # 用于帧缓冲区实现
 
 class StreamProcessor:
-    def __init__(self):
-        self.youtube_url = None
-        self.stream_url = None
+    def __init__(self, youtube_url):
+        self.youtube_url = youtube_url
         self.cap = None
         self.is_running = True  # Set to True initially
+        self.latest_frame = None
         self.frame_count = 0
         self.fps = 0
+        # FPS measurement window state
+        # FPS 计算使用滑动窗口统计
         self._fps_window_start = time.time()
         self._fps_window_count = 0
-
-        # Dedicated, low-contention frame slot for MJPEG streaming
-        # 用于 MJPEG 流的专用、低竞争的帧槽
-        self._mjpeg_frame = None
-        self._mjpeg_lock = threading.Lock()
+        self.lock = threading.Lock()
+        
+        # Frame buffer for smoother streaming
+        # 帧缓冲区以实现更流畅的流媒体传输
+        self.frame_buffer = deque(maxlen=3)  # Small buffer to reduce latency
+        self.buffer_lock = threading.Lock()
         
         # Performance monitoring
         # 性能监控
@@ -64,158 +66,223 @@ class StreamProcessor:
             logging.error(f"Error validating stream: {str(e)}")
             return False, f"An exception occurred: {str(e)}"
     
-    def _get_stream_url(self):
-        if not self.youtube_url:
-            logging.error("YouTube URL is not set.")
-            return None
-
-        self._status = "Getting stream URL..."
-        logging.info(f"Attempting to get stream URL for {self.youtube_url}")
+    def get_stream_url(self):
+        """Get the direct stream URL using yt-dlp."""
         try:
-            ydl_opts = {
-                'format': 'best[height<=720]',
-                'quiet': True,
-                'no_warnings': True,
-                'cookiefile': 'cookies.txt'
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info_dict = ydl.extract_info(self.youtube_url, download=False)
-                stream_url = info_dict.get('url')
-                if stream_url:
-                    logging.info(f"Got new stream URL: {stream_url[:100]}...")
-                    self._status = "Got stream URL. Initializing video capture..."
-                    return stream_url
-                else:
-                    self._status = "Failed to get stream URL."
-                    logging.error("Failed to get stream URL.")
-                    return None
+            cmd = ['yt-dlp', '--get-url', '--format', 'best[height<=720]', self.youtube_url]
+            if os.path.exists('cookies.txt'):
+                cmd.extend(['--cookies', 'cookies.txt'])
+                logging.info("Using local cookies.txt file for getting stream URL.")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                logging.error(f"yt-dlp error getting URL: {result.stderr}")
+                return None
+            
+            stream_url = result.stdout.strip()
+            logging.info(f"Got stream URL: {stream_url[:100]}...")
+            return stream_url
+            
         except Exception as e:
-            self._status = f"Error getting stream URL: {e}"
-            logging.error(f"Error getting stream URL: {e}")
+            logging.error(f"Error getting stream URL: {str(e)}")
             return None
     
-    def _reconnect(self):
-        self._status = "Reconnecting..."
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-
-        self.stream_url = self._get_stream_url()
-        if self.stream_url:
-            self.cap = cv2.VideoCapture(self.stream_url)
-            if self.cap.isOpened():
-                self._status = "Reconnected successfully. Resuming stream."
-                logging.info("Reconnected and resumed video capture.")
-                return True
-        
-        self._status = "Failed to reconnect."
-        logging.error("Failed to create VideoCapture from new stream URL.")
-        return False
-
     def start_processing(self):
         """Start processing the video stream."""
         retry_count = 0
         max_retries = 3
-
+        
         while retry_count < max_retries and self.is_running:
+            stream_url = None  # Reset stream_url
             try:
-                self.stream_url = self._get_stream_url()
-                if not self.stream_url:
+                # Get direct stream URL inside the loop for fresh URL on each retry
+                stream_url = self.get_stream_url()
+                if not stream_url:
                     logging.error("Failed to get stream URL")
-                    raise IOError("Failed to get stream URL")
+                    retry_count += 1
+                    time.sleep(5)
+                    continue
 
-                self.cap = cv2.VideoCapture(self.stream_url)
+                # Open video capture
+                self.cap = cv2.VideoCapture(stream_url)
+                
                 if not self.cap.isOpened():
                     logging.error("Failed to open video stream")
-                    raise IOError("Failed to open video stream")
-
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)
-                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
-
+                    retry_count += 1
+                    time.sleep(5)
+                    continue
+                
+                # Optimize buffer settings for smoother streaming
+        # 优化缓冲区设置以提升流畅度
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # Slightly larger buffer to handle jitter
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)   # Reduced timeout for faster recovery
+                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)   # Faster timeout to detect issues
+        
+                # Enable hardware acceleration if available
+                # 启用硬件加速（如果可用）
+                try:
+                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('H', '2', '6', '4'))
+                except:
+                    pass  # Fallback to default codec
+                
+                self.is_running = True
                 logging.info("Started video processing")
+                
+                # Reset FPS window when (re)starting
                 self._fps_window_start = time.time()
                 self._fps_window_count = 0
                 consecutive_failures = 0
                 max_consecutive_failures = 10
-
+                
                 while self.is_running:
-                    ret, frame = self.cap.read()
-                    if not ret:
+                    try:
+                        ret, frame = self.cap.read()
+                        
+                        if not ret:
+                            consecutive_failures += 1
+                            logging.warning(f"Failed to read frame ({consecutive_failures}/{max_consecutive_failures})")
+                            
+                            if consecutive_failures >= max_consecutive_failures:
+                                logging.error("Too many consecutive frame read failures, reconnecting...")
+                                break
+                            
+                            time.sleep(0.1)
+                            continue
+                        
+                        # Reset failure counter on successful read
+                        consecutive_failures = 0
+                        
+                        # Validate frame
+                        if frame is None or frame.size == 0:
+                            logging.warning("Received empty frame")
+                            continue
+                        
+                        # Update frame counters and FPS (1-second window)
+                        # 更新帧计数与 FPS（1 秒窗口）
+                        self.frame_count += 1
+                        self._fps_window_count += 1
+                        now = time.time()
+                        elapsed = now - self._fps_window_start
+                        if elapsed >= 1.0:
+                            # Compute FPS for the past window and reset window counters
+                            self.fps = self._fps_window_count / elapsed
+                            self._fps_window_start = now
+                            self._fps_window_count = 0
+                        
+                        # Resize frame for processing
+                        height, width = frame.shape[:2]
+                        if width > 1280:
+                            scale = 1280 / width
+                            new_width = int(width * scale)
+                            new_height = int(height * scale)
+                            frame = cv2.resize(frame, (new_width, new_height))
+                        
+                        # Encode frame as JPEG with optimized settings
+                        # 使用优化设置编码JPEG帧
+                        encode_params = [
+                            cv2.IMWRITE_JPEG_QUALITY, 75,  # Reduced quality for better performance
+                            cv2.IMWRITE_JPEG_OPTIMIZE, 1,  # Enable JPEG optimization
+                            cv2.IMWRITE_JPEG_PROGRESSIVE, 1  # Progressive JPEG for better streaming
+                        ]
+                        success, buffer = cv2.imencode('.jpg', frame, encode_params)
+                        
+                        if not success:
+                            logging.warning("Failed to encode frame as JPEG")
+                            continue
+                        
+                        # Store frame in buffer for smoother delivery
+                        # 将帧存储在缓冲区中以实现更流畅的传输
+                        frame_data = buffer.tobytes()
+                        with self.buffer_lock:
+                            self.frame_buffer.append({
+                                'data': frame_data,
+                                'timestamp': time.time(),
+                                'frame_id': self.frame_count
+                            })
+                        
+                        # Also update latest frame for compatibility
+                        # 同时更新最新帧以保持兼容性
+                        with self.lock:
+                            self.latest_frame = frame_data
+                        
+                        # Track processing performance
+                        # 跟踪处理性能
+                        processing_end = time.time()
+                        self.processing_times.append(processing_end - now)
+                        
+                        # Adaptive frame rate control for smoother streaming
+                        # 自适应帧率控制以提升流畅度
+                        target_fps = 24  # Adjusted from 30 for user request
+                        frame_time = 1.0 / target_fps
+                        processing_time = time.time() - now
+                        sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep
+                        time.sleep(sleep_time)
+                        
+                    except Exception as frame_error:
+                        logging.error(f"Error processing frame: {str(frame_error)}")
                         consecutive_failures += 1
-                        logging.warning(f"Failed to read frame ({consecutive_failures}/{max_consecutive_failures})")
                         if consecutive_failures >= max_consecutive_failures:
-                            logging.error("Max consecutive read failures reached. Breaking to reconnect.")
-                            break  # Break inner loop to trigger reconnection logic
+                            break
                         time.sleep(0.1)
-                        continue
+                
+                # If we exit the frame loop, try to reconnect
+                if self.is_running:
+                    logging.info("Attempting to reconnect to stream...")
+                    self.cleanup()
+                    retry_count += 1
+                    time.sleep(5)
+                else:
+                    break
                     
-                    consecutive_failures = 0
-
-                    if frame is None or frame.size == 0:
-                        logging.warning("Received empty frame")
-                        continue
-
-                    self.frame_count += 1
-                    self._fps_window_count += 1
-                    now = time.time()
-                    elapsed = now - self._fps_window_start
-                    if elapsed >= 1.0:
-                        self.fps = self._fps_window_count / elapsed
-                        self._fps_window_start = now
-                        self._fps_window_count = 0
-
-                    height, width = frame.shape[:2]
-                    if width > 1280:
-                        scale = 1280 / width
-                        new_width = int(width * scale)
-                        new_height = int(height * scale)
-                        frame = cv2.resize(frame, (new_width, new_height))
-
-                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 75, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
-                    success, buffer = cv2.imencode('.jpg', frame, encode_params)
-                    if not success:
-                        logging.warning("Failed to encode frame as JPEG")
-                        continue
-
-                    with self._mjpeg_lock:
-                        self._mjpeg_frame = buffer.tobytes()
-
-                    target_fps = 24
-                    frame_time = 1.0 / target_fps
-                    processing_time = time.time() - now
-                    sleep_time = max(0.001, frame_time - processing_time)
-                    time.sleep(sleep_time)
-
-                # If inner loop breaks (e.g., due to read failures), we'll try to reconnect.
-                if not self.is_running:
-                    break # Exit outer loop if stop() was called
-
             except Exception as e:
-                logging.error(f"Error in stream processing loop: {str(e)}")
+                logging.error(f"Error in stream processing: {str(e)}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    logging.info(f"Retrying stream processing ({retry_count}/{max_retries})...")
+                    time.sleep(5)
+                else:
+                    logging.error("Max retries reached, stopping stream processing")
+                    break
             finally:
                 if self.cap:
                     self.cap.release()
                     self.cap = None
-
-            # Reconnection logic
-            if self.is_running:
-                retry_count += 1
-                logging.info(f"Attempting to reconnect... ({retry_count}/{max_retries})")
-                time.sleep(5)
-            else:
-                break
-
+        
         self.cleanup()
-        logging.info("Stream processing stopped after max retries or manual stop.")
-
-    def get_latest_frame(self):
-        """Get the latest JPEG frame for MJPEG streaming.
-        获取用于 MJPEG 流的最新 JPEG 帧。
-        """
-        with self._mjpeg_lock:
-            return self._mjpeg_frame
+        logging.info("Stream processing stopped")
     
+    def get_latest_frame(self):
+        """Get the latest processed frame with buffer optimization.
+        获取最新处理的帧，使用缓冲区优化。
+        """
+        with self.buffer_lock:
+            if self.frame_buffer:
+                # Return the most recent frame from buffer
+                # 从缓冲区返回最新帧
+                return self.frame_buffer[-1]['data']
+        
+        # Fallback to direct frame access
+        # 回退到直接帧访问
+        with self.lock:
+            return self.latest_frame
+    
+    def get_buffered_frame(self, max_age_ms=100):
+        """Get a frame from buffer that's not too old.
+        从缓冲区获取不太旧的帧。
+        """
+        current_time = time.time()
+        with self.buffer_lock:
+            # Find the newest frame that's not too old
+            # 找到不太旧的最新帧
+            for frame_info in reversed(self.frame_buffer):
+                age_ms = (current_time - frame_info['timestamp']) * 1000
+                if age_ms <= max_age_ms:
+                    return frame_info['data']
+        
+        # If no recent frame, return the latest available
+        # 如果没有最近的帧，返回最新可用的
+        return self.get_latest_frame()
     
     def get_performance_stats(self):
         """Get performance statistics.
@@ -228,7 +295,7 @@ class StreamProcessor:
         return {
             'avg_processing_time': avg_time * 1000,  # Convert to ms
             'dropped_frames': self.dropped_frames,
-            'buffer_size': 1 if self._mjpeg_frame else 0
+            'buffer_size': len(self.frame_buffer)
         }
     
     def stop(self):
@@ -244,5 +311,9 @@ class StreamProcessor:
             self.cap.release()
             self.cap = None
         
+        # Clear frame buffer
+        # 清空帧缓冲区
+        with self.buffer_lock:
+            self.frame_buffer.clear()
         
         logging.info("Stream processor cleaned up")

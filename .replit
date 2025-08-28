@@ -6,7 +6,7 @@ packages = ["libGL", "libGLU", "openssl", "postgresql", "lsof", "file", "uv"]
 
 [deployment]
 deploymentTarget = "autoscale"
-run = ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]
+run = ["gunicorn", "--bind", "0.0.0.0:5000", "main:app"]
 
 [workflows]
 runButton = "Project"
@@ -26,7 +26,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "gunicorn -c gunicorn.conf.py main:app"
+args = "gunicorn --bind 0.0.0.0:5000 --reuse-port --reload main:app"
 waitForPort = 5000
 
 [[ports]]

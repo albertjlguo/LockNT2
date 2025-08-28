@@ -9,7 +9,8 @@ from urllib.parse import urlparse
 
 # Global stream processor instance
 stream_processor = None
-stream_thread = None
+processing_thread = None
+is_processing = False
 
 @app.route('/')
 def index():
@@ -19,48 +20,64 @@ def index():
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
     """Start processing a YouTube live stream."""
-    global stream_processor, stream_thread
+    global stream_processor, processing_thread, is_processing
     
-    data = request.get_json()
-    youtube_url = data.get('youtube_url')
-    
-    if not youtube_url:
-        return jsonify({"error": "youtube_url is required"}), 400
-
-    if stream_processor and stream_processor.is_running:
-        return jsonify({"message": "Stream is already running"}), 200
-
-    logging.info(f"Started processing stream: {youtube_url}")
-    
-    # Initialize and start the stream processor
-    stream_processor = StreamProcessor()
-    stream_thread = threading.Thread(target=stream_processor.start_processing, args=(youtube_url,), daemon=True)
-    stream_thread.start()
-    
-    # Wait a moment for the stream to initialize before returning
-    time.sleep(2) # Give it time to get the first frames
-    
-    return jsonify({"message": "Stream processing started successfully"})
+    try:
+        data = request.get_json()
+        youtube_url = data.get('url', '').strip()
+        
+        if not youtube_url:
+            return jsonify({'error': 'YouTube URL is required'}), 400
+        
+        # Validate YouTube URL format (strict domain whitelist)
+        # 严格的域名白名单校验，防止 SSRF
+        if not is_valid_youtube_url(youtube_url):
+            return jsonify({'error': 'Invalid YouTube URL format (must be a valid YouTube URL)'}), 400
+        
+        # Stop existing stream if running
+        if is_processing:
+            stop_stream_processing()
+        
+        # Initialize stream processor
+        stream_processor = StreamProcessor(youtube_url)
+        
+        # Validate stream URL
+        validation_result, error_message = stream_processor.validate_stream()
+        if not validation_result:
+            logging.error(f"Stream validation failed for URL {youtube_url}: {error_message}")
+            return jsonify({'error': f'Unable to access the YouTube stream. Reason: {error_message}'}), 400
+        
+        # Start processing in background thread
+        is_processing = True
+        processing_thread = threading.Thread(target=stream_processor.start_processing)
+        processing_thread.daemon = True
+        processing_thread.start()
+        
+        logging.info(f"Started processing stream: {youtube_url}")
+        return jsonify({'message': 'Stream processing started successfully'})
+        
+    except Exception as e:
+        logging.error(f"Error starting stream: {str(e)}")
+        return jsonify({'error': f'Failed to start stream processing: {str(e)}'}), 500
 
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
     """Stop the current stream processing."""
-    global stream_processor, stream_thread
+    global is_processing
     
-    if stream_processor:
-        stream_processor.stop()
-        if stream_thread:
-            stream_thread.join() # Wait for the thread to finish
-        stream_processor = None
-    
-    return jsonify({"message": "Stream stopped"})
+    try:
+        stop_stream_processing()
+        return jsonify({'message': 'Stream processing stopped'})
+    except Exception as e:
+        logging.error(f"Error stopping stream: {str(e)}")
+        return jsonify({'error': f'Failed to stop stream: {str(e)}'}), 500
 
 @app.route('/stream_status')
 def stream_status():
     """Get current stream processing status."""
-    global stream_processor
+    global stream_processor, is_processing
     
-    if not stream_processor:
+    if not is_processing or not stream_processor:
         return jsonify({
             'active': False,
             'url': None,
@@ -69,7 +86,7 @@ def stream_status():
         })
     
     return jsonify({
-        'active': stream_processor.is_running,
+        'active': True,
         'url': stream_processor.youtube_url,
         'frame_count': stream_processor.frame_count,
         'fps': stream_processor.fps
@@ -80,7 +97,7 @@ def video_feed():
     """Get current video frame as JPEG image."""
     global stream_processor
     
-    if not stream_processor or not stream_processor.is_running:
+    if not stream_processor or not is_processing:
         return Response("No active stream", status=404)
     
     frame = stream_processor.get_latest_frame()
@@ -89,33 +106,6 @@ def video_feed():
     else:
         return Response("No frame available", status=503)
 
-def gen_frames():
-    """Generate frame-by-frame for video stream."""
-    frame_count = 0
-    none_frame_count = 0
-    max_none_frames = 100 # ~3 seconds of no frames
-
-    try:
-        while True:
-            frame = stream_processor.get_latest_frame()
-            if frame:
-                none_frame_count = 0 # Reset counter on success
-                frame_count += 1
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            else:
-                none_frame_count += 1
-                logging.warning("gen_frames: get_latest_frame() returned None. Consecutive None frames: %d", none_frame_count)
-                if none_frame_count > max_none_frames:
-                    logging.error("gen_frames: No frame received for too long. Closing MJPEG stream.")
-                    break
-
-            time.sleep(1/30) # Limit frame rate
-    except Exception as e:
-        logging.error(f"Exception in gen_frames: {e}")
-    finally:
-        logging.info("gen_frames: Exiting generator. Total frames sent: %d", frame_count)
-
 @app.route('/video_feed_mjpeg')
 def video_feed_mjpeg():
     """Enhanced MJPEG streaming with adaptive frame delivery and buffer optimization.
@@ -123,44 +113,64 @@ def video_feed_mjpeg():
     """
     global stream_processor
 
-    if not stream_processor or not stream_processor.is_running:
+    if not stream_processor or not is_processing:
         return Response("No active stream", status=404)
 
     def generate():
         boundary = "frame"
-        last_frame_sent = None
-
-        while stream_processor and stream_processor.is_running:
+        last_frame_id = -1
+        frame_skip_count = 0
+        max_skip_frames = 2  # Skip at most 2 frames to maintain smoothness
+        
+        while is_processing and stream_processor:
             try:
-                frame = stream_processor.get_latest_frame()
-
-                # If frame is not available, wait briefly and retry.
-                # This handles the initial startup race condition.
-                # 如果帧不可用，请稍等片刻然后重试。这可以解决初始启动竞态条件。
-                if frame is None:
-                    time.sleep(0.1)  # Wait for the first frame to be ready
-                    continue
-
-                # Send frame only if it's new to avoid redundant transmissions
-                # 仅当帧为新时才发送，以避免冗余传输
-                if frame != last_frame_sent:
-                    last_frame_sent = frame
-                    yield (
-                        b"--" + boundary.encode() + b"\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + 
-                        frame + b"\r\n"
-                    )
+                # Use buffered frame with age limit for smoother delivery
+                # 使用带年龄限制的缓冲帧以实现更流畅的传输
+                frame = stream_processor.get_buffered_frame(max_age_ms=50)
+                current_frame_id = stream_processor.frame_count if stream_processor else last_frame_id
                 
-                # Control the stream's frame rate to about 30 FPS
-                # 将流的帧率控制在约 30 FPS
-                time.sleep(1 / 30)
-
+                # Implement adaptive frame skipping to maintain target frame rate
+                # 实现自适应跳帧以保持目标帧率
+                if frame is not None and current_frame_id != last_frame_id:
+                    # Check if we should skip this frame to maintain smooth playback
+                    # 检查是否应跳过此帧以保持流畅播放
+                    frame_gap = current_frame_id - last_frame_id
+                    if frame_gap > 1 and frame_skip_count < max_skip_frames:
+                        frame_skip_count += 1
+                        # Remove blocking sleep to prevent worker timeout
+                        # 移除阻塞性sleep以防止worker超时
+                        continue
+                    
+                    frame_skip_count = 0
+                    last_frame_id = current_frame_id
+                    
+                    # Enhanced MJPEG headers with performance optimizations
+                    # 增强的MJPEG头部，包含性能优化
+                    timestamp = str(int(time.time() * 1000))
+                    yield (b"--" + boundary.encode() + b"\r\n"
+                           b"Content-Type: image/jpeg\r\n"
+                           b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                           b"Pragma: no-cache\r\n"
+                           b"Expires: 0\r\n"
+                           b"X-Timestamp: " + timestamp.encode() + b"\r\n"
+                           b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
+                           b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+                else:
+                    # Non-blocking frame waiting - yield control instead of sleep
+                    # 非阻塞帧等待 - 让出控制权而非休眠
+                    # Use a very short yield to prevent busy waiting while avoiding worker timeout
+                    # 使用极短的让出以防止忙等待，同时避免worker超时
+                    import threading
+                    threading.Event().wait(0.001)  # Non-blocking minimal wait
+                    
             except GeneratorExit:
                 break
             except Exception as e:
-                logging.error(f"Error in MJPEG generator: {e}")
-                time.sleep(0.1)  # Sleep longer on error
+                logging.error(f"Error in enhanced MJPEG generator: {e}")
+                # Use non-blocking recovery pause to prevent worker timeout
+                # 使用非阻塞恢复暂停以防止worker超时
+                import threading
+                threading.Event().wait(0.005)  # Brief non-blocking recovery pause
 
     return Response(generate(), 
                     mimetype='multipart/x-mixed-replace; boundary=frame',
@@ -188,3 +198,15 @@ def is_valid_youtube_url(url: str) -> bool:
         return host in allowed and bool(p.path)
     except Exception:
         return False
+
+def stop_stream_processing():
+    """Helper function to stop stream processing."""
+    global stream_processor, processing_thread, is_processing
+    
+    is_processing = False
+    if stream_processor:
+        stream_processor.stop()
+        stream_processor = None
+    
+    if processing_thread and processing_thread.is_alive():
+        processing_thread.join(timeout=2)
