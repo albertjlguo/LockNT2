@@ -12,8 +12,8 @@ import yt_dlp  # For YouTube-DL functionality
 # 用于帧缓冲区实现
 
 class StreamProcessor:
-    def __init__(self, youtube_url):
-        self.youtube_url = youtube_url
+    def __init__(self):
+        self.youtube_url = None
         self.stream_url = None
         self.cap = None
         self.is_running = True  # Set to True initially

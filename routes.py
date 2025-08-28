@@ -9,8 +9,7 @@ from urllib.parse import urlparse
 
 # Global stream processor instance
 stream_processor = None
-processing_thread = None
-is_processing = False
+stream_thread = None
 
 @app.route('/')
 def index():
@@ -20,64 +19,48 @@ def index():
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
     """Start processing a YouTube live stream."""
-    global stream_processor, processing_thread, is_processing
+    global stream_processor, stream_thread
     
-    try:
-        data = request.get_json()
-        youtube_url = data.get('url', '').strip()
-        
-        if not youtube_url:
-            return jsonify({'error': 'YouTube URL is required'}), 400
-        
-        # Validate YouTube URL format (strict domain whitelist)
-        # 严格的域名白名单校验，防止 SSRF
-        if not is_valid_youtube_url(youtube_url):
-            return jsonify({'error': 'Invalid YouTube URL format (must be a valid YouTube URL)'}), 400
-        
-        # Stop existing stream if running
-        if is_processing:
-            stop_stream_processing()
-        
-        # Initialize stream processor
-        stream_processor = StreamProcessor(youtube_url)
-        
-        # Validate stream URL
-        validation_result, error_message = stream_processor.validate_stream()
-        if not validation_result:
-            logging.error(f"Stream validation failed for URL {youtube_url}: {error_message}")
-            return jsonify({'error': f'Unable to access the YouTube stream. Reason: {error_message}'}), 400
-        
-        # Start processing in background thread
-        is_processing = True
-        processing_thread = threading.Thread(target=stream_processor.start_processing)
-        processing_thread.daemon = True
-        processing_thread.start()
-        
-        logging.info(f"Started processing stream: {youtube_url}")
-        return jsonify({'message': 'Stream processing started successfully'})
-        
-    except Exception as e:
-        logging.error(f"Error starting stream: {str(e)}")
-        return jsonify({'error': f'Failed to start stream processing: {str(e)}'}), 500
+    data = request.get_json()
+    youtube_url = data.get('youtube_url')
+    
+    if not youtube_url:
+        return jsonify({"error": "youtube_url is required"}), 400
+
+    if stream_processor and stream_processor.is_running:
+        return jsonify({"message": "Stream is already running"}), 200
+
+    logging.info(f"Started processing stream: {youtube_url}")
+    
+    # Initialize and start the stream processor
+    stream_processor = StreamProcessor()
+    stream_thread = threading.Thread(target=stream_processor.start_processing, args=(youtube_url,), daemon=True)
+    stream_thread.start()
+    
+    # Wait a moment for the stream to initialize before returning
+    time.sleep(2) # Give it time to get the first frames
+    
+    return jsonify({"message": "Stream processing started successfully"})
 
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
     """Stop the current stream processing."""
-    global is_processing
+    global stream_processor, stream_thread
     
-    try:
-        stop_stream_processing()
-        return jsonify({'message': 'Stream processing stopped'})
-    except Exception as e:
-        logging.error(f"Error stopping stream: {str(e)}")
-        return jsonify({'error': f'Failed to stop stream: {str(e)}'}), 500
+    if stream_processor:
+        stream_processor.stop()
+        if stream_thread:
+            stream_thread.join() # Wait for the thread to finish
+        stream_processor = None
+    
+    return jsonify({"message": "Stream stopped"})
 
 @app.route('/stream_status')
 def stream_status():
     """Get current stream processing status."""
-    global stream_processor, is_processing
+    global stream_processor
     
-    if not is_processing or not stream_processor:
+    if not stream_processor:
         return jsonify({
             'active': False,
             'url': None,
@@ -86,7 +69,7 @@ def stream_status():
         })
     
     return jsonify({
-        'active': True,
+        'active': stream_processor.is_running,
         'url': stream_processor.youtube_url,
         'frame_count': stream_processor.frame_count,
         'fps': stream_processor.fps
@@ -97,7 +80,7 @@ def video_feed():
     """Get current video frame as JPEG image."""
     global stream_processor
     
-    if not stream_processor or not is_processing:
+    if not stream_processor or not stream_processor.is_running:
         return Response("No active stream", status=404)
     
     frame = stream_processor.get_latest_frame()
@@ -106,6 +89,33 @@ def video_feed():
     else:
         return Response("No frame available", status=503)
 
+def gen_frames():
+    """Generate frame-by-frame for video stream."""
+    frame_count = 0
+    none_frame_count = 0
+    max_none_frames = 100 # ~3 seconds of no frames
+
+    try:
+        while True:
+            frame = stream_processor.get_latest_frame()
+            if frame:
+                none_frame_count = 0 # Reset counter on success
+                frame_count += 1
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            else:
+                none_frame_count += 1
+                logging.warning("gen_frames: get_latest_frame() returned None. Consecutive None frames: %d", none_frame_count)
+                if none_frame_count > max_none_frames:
+                    logging.error("gen_frames: No frame received for too long. Closing MJPEG stream.")
+                    break
+
+            time.sleep(1/30) # Limit frame rate
+    except Exception as e:
+        logging.error(f"Exception in gen_frames: {e}")
+    finally:
+        logging.info("gen_frames: Exiting generator. Total frames sent: %d", frame_count)
+
 @app.route('/video_feed_mjpeg')
 def video_feed_mjpeg():
     """Enhanced MJPEG streaming with adaptive frame delivery and buffer optimization.
@@ -113,14 +123,14 @@ def video_feed_mjpeg():
     """
     global stream_processor
 
-    if not stream_processor or not is_processing:
+    if not stream_processor or not stream_processor.is_running:
         return Response("No active stream", status=404)
 
     def generate():
         boundary = "frame"
         last_frame_sent = None
 
-        while is_processing and stream_processor:
+        while stream_processor and stream_processor.is_running:
             try:
                 frame = stream_processor.get_latest_frame()
 
@@ -178,15 +188,3 @@ def is_valid_youtube_url(url: str) -> bool:
         return host in allowed and bool(p.path)
     except Exception:
         return False
-
-def stop_stream_processing():
-    """Helper function to stop stream processing."""
-    global stream_processor, processing_thread, is_processing
-    
-    is_processing = False
-    if stream_processor:
-        stream_processor.stop()
-        stream_processor = None
-    
-    if processing_thread and processing_thread.is_alive():
-        processing_thread.join(timeout=2)
