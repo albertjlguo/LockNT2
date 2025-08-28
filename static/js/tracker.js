@@ -74,6 +74,180 @@
     return { h, s, v };
   }
 
+  // ----------------------- Kalman Filter --------------------------
+  /**
+   * Kalman Filter for object tracking
+   * 用于目标追踪的卡尔曼滤波器
+   */
+  class KalmanFilter {
+    constructor(initialX, initialY) {
+      // State vector [x, y, vx, vy]
+      // 状态向量 [x位置, y位置, x速度, y速度]
+      this.x = [initialX, initialY, 0, 0];
+
+      const dt = 1 / 30; // Assume 30 FPS
+
+      // State transition matrix (F)
+      // 状态转移矩阵 (恒速模型)
+      this.F = [
+        [1, 0, dt, 0],
+        [0, 1, 0, dt],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+      ];
+
+      // Measurement matrix (H) - we only observe position
+      // 测量矩阵 (只观测位置)
+      this.H = [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0]
+      ];
+
+      // Covariance matrix (P)
+      // 协方差矩阵
+      this.P = [
+        [10, 0, 0, 0],
+        [0, 10, 0, 0],
+        [0, 0, 100, 0],
+        [0, 0, 0, 100]
+      ];
+
+      // Process noise covariance (Q)
+      // 过程噪声协方差
+      this.Q = [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 10, 0],
+        [0, 0, 0, 10]
+      ];
+
+      // Measurement noise covariance (R)
+      // 测量噪声协方差
+      this.R = [
+        [5, 0],
+        [0, 5]
+      ];
+    }
+
+    predict() {
+      // Predict state: x_pred = F * x
+      this.x = this.matrixMultiplyVector(this.F, this.x);
+
+      // Predict covariance: P_pred = F * P * F^T + Q
+      const FP = this.matrixMultiply(this.F, this.P);
+      const FPFt = this.matrixMultiply(FP, this.transpose(this.F));
+      this.P = this.matrixAdd(FPFt, this.Q);
+
+      return { x: this.x[0], y: this.x[1] };
+    }
+
+    update(measuredX, measuredY) {
+      const z = [measuredX, measuredY];
+
+      // Innovation: y = z - H * x_pred
+      const y = this.vectorSubtract(z, this.matrixMultiplyVector(this.H, this.x));
+
+      // Innovation covariance: S = H * P * H^T + R
+      const HP = this.matrixMultiply(this.H, this.P);
+      const HPht = this.matrixMultiply(HP, this.transpose(this.H));
+      const S = this.matrixAdd(HPht, this.R);
+
+      // Kalman gain: K = P * H^T * S^(-1)
+      const Pht = this.matrixMultiply(this.P, this.transpose(this.H));
+      const K = this.matrixMultiply(Pht, this.matrixInverse(S));
+
+      // Update state: x = x_pred + K * y
+      this.x = this.vectorAdd(this.x, this.matrixMultiplyVector(K, y));
+
+      // Update covariance: P = (I - K * H) * P
+      const I = this.identity(4);
+      const KH = this.matrixMultiply(K, this.H);
+      const I_KH = this.matrixSubtract(I, KH);
+      this.P = this.matrixMultiply(I_KH, this.P);
+    }
+
+    // --- Matrix Helper Functions ---
+    matrixMultiplyVector(A, v) {
+      const result = [];
+      for (let i = 0; i < A.length; i++) {
+        let sum = 0;
+        for (let j = 0; j < v.length; j++) {
+          sum += A[i][j] * v[j];
+        }
+        result.push(sum);
+      }
+      return result;
+    }
+
+    matrixMultiply(A, B) {
+      const result = Array(A.length).fill(0).map(() => Array(B[0].length).fill(0));
+      for (let i = 0; i < A.length; i++) {
+        for (let j = 0; j < B[0].length; j++) {
+          for (let k = 0; k < A[0].length; k++) {
+            result[i][j] += A[i][k] * B[k][j];
+          }
+        }
+      }
+      return result;
+    }
+
+    matrixAdd(A, B) {
+      const result = [];
+      for (let i = 0; i < A.length; i++) {
+        result.push([]);
+        for (let j = 0; j < A[0].length; j++) {
+          result[i].push(A[i][j] + B[i][j]);
+        }
+      }
+      return result;
+    }
+
+    matrixSubtract(A, B) {
+        const result = [];
+        for (let i = 0; i < A.length; i++) {
+            result.push([]);
+            for (let j = 0; j < A[0].length; j++) {
+                result[i].push(A[i][j] - B[i][j]);
+            }
+        }
+        return result;
+    }
+
+    transpose(A) {
+      const result = Array(A[0].length).fill(0).map(() => Array(A.length).fill(0));
+      for (let i = 0; i < A.length; i++) {
+        for (let j = 0; j < A[0].length; j++) {
+          result[j][i] = A[i][j];
+        }
+      }
+      return result;
+    }
+
+    matrixInverse(A) { // Only for 2x2 matrix
+      const det = A[0][0] * A[1][1] - A[0][1] * A[1][0];
+      if (det === 0) return [[0, 0], [0, 0]]; // Should not happen
+      const invDet = 1 / det;
+      return [
+        [A[1][1] * invDet, -A[0][1] * invDet],
+        [-A[1][0] * invDet, A[0][0] * invDet]
+      ];
+    }
+
+    vectorAdd(v1, v2) {
+      return v1.map((val, i) => val + v2[i]);
+    }
+
+    vectorSubtract(v1, v2) {
+      return v1.map((val, i) => val - v2[i]);
+    }
+
+    identity(size) {
+        const I = Array(size).fill(0).map(() => Array(size).fill(0));
+        for (let i = 0; i < size; i++) I[i][i] = 1;
+        return I;
+    }
+  }
+
   // ----------------------- Hungarian Algorithm --------------------------
   /**
    * Hungarian Algorithm for optimal assignment in tracking
@@ -363,9 +537,7 @@
       this.cx = bbox.x + bbox.w / 2; // center
       this.cy = bbox.y + bbox.h / 2;
       this.w = bbox.w; this.h = bbox.h;
-      this.vx = 0; this.vy = 0;
-      this.alpha = opts.alpha ?? 0.7; // Increased for better responsiveness
-      this.beta = opts.beta ?? 0.3;   // Reduced for smoother velocity updates
+      this.kalmanFilter = new KalmanFilter(this.cx, this.cy);
       this.locked = !!opts.locked;
       this.color = COLOR_POOL[(id - 1) % COLOR_POOL.length];
       this.feature = null; // EMA feature
@@ -382,15 +554,6 @@
         predictedPosition: { cx: this.cx, cy: this.cy },
         confidence: 1.0,
         searchRadius: Math.max(bbox.w, bbox.h) * 0.5
-      };
-      
-      // Motion model improvements
-      // 运动模型改进
-      this.motionModel = {
-        acceleration: { ax: 0, ay: 0 },
-        velocityHistory: [],
-        positionHistory: [],
-        maxHistory: 10
       };
       
       // Enhanced appearance model for ID consistency in crowded scenes
@@ -423,153 +586,59 @@
       if (this.trajectory.length > 60) this.trajectory.shift();
     }
 
-    /** Enhanced prediction with motion model and occlusion handling */
+    /** Prediction using Kalman Filter */
     predict() {
-      // Update motion history
-      // 更新运动历史
-      this.motionModel.positionHistory.push({ x: this.cx, y: this.cy, t: Date.now() });
-      this.motionModel.velocityHistory.push({ vx: this.vx, vy: this.vy, t: Date.now() });
-      
-      if (this.motionModel.positionHistory.length > this.motionModel.maxHistory) {
-        this.motionModel.positionHistory.shift();
-        this.motionModel.velocityHistory.shift();
-      }
-      
-      // Enhanced acceleration calculation with smoothing
-      // 增强的加速度计算，包含平滑处理
-      if (this.motionModel.velocityHistory.length >= 3) {
-        const recent = this.motionModel.velocityHistory.slice(-3);
-        let axSum = 0, aySum = 0, validSamples = 0;
-        
-        for (let i = 1; i < recent.length; i++) {
-          const dt = (recent[i].t - recent[i-1].t) / 1000;
-          if (dt > 0 && dt < 0.1) { // Valid time delta
-            axSum += (recent[i].vx - recent[i-1].vx) / dt;
-            aySum += (recent[i].vy - recent[i-1].vy) / dt;
-            validSamples++;
-          }
-        }
-        
-        if (validSamples > 0) {
-          // Smooth acceleration with exponential moving average
-          // 使用指数移动平均平滑加速度
-          const newAx = axSum / validSamples;
-          const newAy = aySum / validSamples;
-          const smoothingFactor = 0.3;
-          
-          this.motionModel.acceleration.ax = 
-            smoothingFactor * newAx + (1 - smoothingFactor) * this.motionModel.acceleration.ax;
-          this.motionModel.acceleration.ay = 
-            smoothingFactor * newAy + (1 - smoothingFactor) * this.motionModel.acceleration.ay;
-        }
-      }
-      
-      // Enhanced prediction with acceleration and confidence weighting
-      // 包含加速度和置信度权重的增强预测
-      const dt = 1/30; // Assume 30 FPS
-      const confidenceFactor = Math.min(1.0, this.hits / 15); // Build confidence over time
-      
-      // Apply acceleration only if we have sufficient confidence
-      // 仅在有足够置信度时应用加速度
-      const accelWeight = confidenceFactor * 0.5;
-      let xp = this.cx + this.vx * dt + accelWeight * this.motionModel.acceleration.ax * dt * dt;
-      let yp = this.cy + this.vy * dt + accelWeight * this.motionModel.acceleration.ay * dt * dt;
-      
-      // Update velocity with damped acceleration
-      // 使用阻尼加速度更新速度
-      const velocityDamping = this.locked ? 0.8 : 0.9; // More aggressive damping for locked tracks
-      this.vx = this.vx * velocityDamping + accelWeight * this.motionModel.acceleration.ax * dt;
-      this.vy = this.vy * velocityDamping + accelWeight * this.motionModel.acceleration.ay * dt;
-      
-      // Apply additional damping to prevent runaway
-      // 应用额外阻尼防止失控
-      const dampingFactor = this.occlusionState.isOccluded ? 0.92 : 0.96;
-      this.vx *= dampingFactor;
-      this.vy *= dampingFactor;
-      
+      const predicted = this.kalmanFilter.predict();
+      this.cx = predicted.x;
+      this.cy = predicted.y;
+
+      const vx = this.kalmanFilter.x[2];
+      const vy = this.kalmanFilter.x[3];
+
       // Handle occlusion state with improved prediction
-      // 使用改进预测处理遮挡状态
       if (this.occlusionState.isOccluded) {
         // Adaptive search radius expansion
-        // 自适应搜索半径扩展
-        const expansionRate = Math.min(1.08, 1.02 + Math.sqrt(this.vx*this.vx + this.vy*this.vy) / 100);
+        const expansionRate = Math.min(1.08, 1.02 + Math.sqrt(vx*vx + vy*vy) / 100);
         this.occlusionState.searchRadius *= expansionRate;
         this.occlusionState.searchRadius = Math.min(this.occlusionState.searchRadius, 250);
         
         // Confidence decay with velocity consideration
-        // 考虑速度的置信度衰减
-        const velocityMagnitude = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+        const velocityMagnitude = Math.sqrt(vx*vx + vy*vy);
         const decayRate = velocityMagnitude > 20 ? 0.93 : 0.95; // Faster decay for fast-moving objects
         this.occlusionState.confidence *= decayRate;
         
         // Store predicted position
-        // 存储预测位置
-        this.occlusionState.predictedPosition = { cx: xp, cy: yp };
+        this.occlusionState.predictedPosition = { cx: this.cx, cy: this.cy };
       } else {
         // Update last known position when not occluded
-        // 未遮挡时更新最后已知位置
         this.occlusionState.lastKnownPosition = { cx: this.cx, cy: this.cy };
         this.occlusionState.confidence = Math.min(1.0, this.occlusionState.confidence + 0.15);
         // Reset search radius when not occluded
-        // 未遮挡时重置搜索半径
         this.occlusionState.searchRadius = Math.max(this.w, this.h) * 0.6;
       }
-      
-      this.cx = xp;
-      this.cy = yp;
+
       this._pushTrajectory();
     }
 
-    /** Enhanced update with occlusion recovery and appearance templates */
+    /** Update with Kalman Filter */
     update(detBbox, feature) {
-      const zx = detBbox.x + detBbox.w / 2;
-      const zy = detBbox.y + detBbox.h / 2;
-      
-      // Check if this is a recovery from occlusion
-      // 检查是否从遮挡中恢复
-      const wasOccluded = this.occlusionState.isOccluded;
-      
-      // The prediction is already done in predict(). cx/cy are the predicted state.
-      const xp = this.cx;
-      const yp = this.cy;
-      
-      // Calculate innovation (measurement residual)
-      // 计算新息（测量残差）
-      const rx = zx - xp; 
-      const ry = zy - yp;
-      const innovationMagnitude = Math.sqrt(rx * rx + ry * ry);
-      
-      // Adaptive update gains based on innovation and occlusion state
-      // 基于新息和遮挡状态的自适应更新增益
-      let adaptiveAlpha = this.alpha;
-      let adaptiveBeta = this.beta;
-      
-      if (wasOccluded) {
-        // Higher gains for quick recovery from occlusion
-        // 遮挡恢复时使用更高增益
-        adaptiveAlpha = Math.min(0.9, this.alpha * 1.5);
-        adaptiveBeta = Math.min(0.5, this.beta * 1.2);
-        
-        // Reset occlusion state
-        // 重置遮挡状态
+      const measuredX = detBbox.x + detBbox.w / 2;
+      const measuredY = detBbox.y + detBbox.h / 2;
+
+      // Update Kalman filter with new measurement
+      this.kalmanFilter.update(measuredX, measuredY);
+
+      // Update track state from filter
+      this.cx = this.kalmanFilter.x[0];
+      this.cy = this.kalmanFilter.x[1];
+
+      // Reset occlusion state if it was occluded
+      if (this.occlusionState.isOccluded) {
         this.occlusionState.isOccluded = false;
         this.occlusionState.searchRadius = Math.max(detBbox.w, detBbox.h) * 0.5;
-      } else if (innovationMagnitude > 50) {
-        // Large innovation suggests rapid movement, increase responsiveness
-        // 大的新息表明快速运动，增加响应性
-        adaptiveAlpha = Math.min(0.8, this.alpha * 1.2);
-        adaptiveBeta = Math.min(0.4, this.beta * 1.1);
       }
       
-      // State update
-      // 状态更新
-      this.cx = xp + adaptiveAlpha * rx;
-      this.cy = yp + adaptiveAlpha * ry;
-      this.vx = this.vx + adaptiveBeta * rx;
-      this.vy = this.vy + adaptiveBeta * ry;
-      
       // Adaptive size smoothing based on confidence
-      // 基于置信度的自适应尺寸平滑
       const sizeWeight = Math.max(0.2, this.occlusionState.confidence * 0.4);
       this.w = (1 - sizeWeight) * this.w + sizeWeight * detBbox.w;
       this.h = (1 - sizeWeight) * this.h + sizeWeight * detBbox.h;
@@ -579,7 +648,6 @@
       this._pushTrajectory();
       
       // Enhanced appearance model with multiple templates
-      // 增强的外观模型，支持多个模板
       if (feature) {
         this.updateAppearanceModel(feature);
       }
@@ -730,7 +798,9 @@
         
         // Adaptive initial search radius based on velocity
         // 基于速度的自适应初始搜索半径
-        const velocityMagnitude = Math.sqrt((this.vx || 0)**2 + (this.vy || 0)**2);
+        const vx = this.kalmanFilter.x[2];
+        const vy = this.kalmanFilter.x[3];
+        const velocityMagnitude = Math.sqrt(vx**2 + vy**2);
         const baseRadius = Math.max(this.w, this.h) * 0.8;
         const velocityBonus = Math.min(50, velocityMagnitude * 2); // Up to 50px bonus
         this.occlusionState.searchRadius = baseRadius + velocityBonus;
