@@ -123,12 +123,16 @@ def video_feed_mjpeg():
         max_skip_frames = 2  # Skip at most 2 frames to maintain smoothness
         
         last_send_ts = time.time()
+        last_frame_send_ts = 0.0  # Control max MJPEG send rate
+        last_progress_ts = time.time()  # Track progress to detect stalls
+        stall_timeout = 4.0  # seconds without new frames triggers reconnect
         heartbeat_interval = 2.0  # seconds; send a keepalive chunk to prevent worker timeout
+        min_frame_interval = 1.0 / 15.0  # Pace to ~15 FPS
         while stream_processor and getattr(stream_processor, 'is_running', False):
             try:
                 # Use buffered frame with age limit for smoother delivery
                 # 使用带年龄限制的缓冲帧以实现更流畅的传输
-                frame = stream_processor.get_buffered_frame(max_age_ms=50)
+                frame = stream_processor.get_buffered_frame(max_age_ms=2200)
                 current_frame_id = stream_processor.frame_count if stream_processor else last_frame_id
                 
                 # Implement adaptive frame skipping to maintain target frame rate
@@ -145,10 +149,17 @@ def video_feed_mjpeg():
                     
                     frame_skip_count = 0
                     last_frame_id = current_frame_id
+                    last_progress_ts = time.time()  # Progress made
                     
                     # Enhanced MJPEG headers with performance optimizations
                     # 增强的MJPEG头部，包含性能优化
-                    timestamp = str(int(time.time() * 1000))
+                    # Pace output to ~15 FPS
+                    now_send = time.time()
+                    if last_frame_send_ts and (now_send - last_frame_send_ts) < min_frame_interval:
+                        # sleep the remaining time
+                        time.sleep(max(0.0, min_frame_interval - (now_send - last_frame_send_ts)))
+                    last_frame_send_ts = time.time()
+                    timestamp = str(int(last_frame_send_ts * 1000))
                     yield (b"--" + boundary.encode() + b"\r\n"
                            b"Content-Type: image/jpeg\r\n"
                            b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
@@ -158,15 +169,29 @@ def video_feed_mjpeg():
                            b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
                            b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
                 else:
-                    # Heartbeat: if no new frame for a while, send a small keepalive chunk to avoid Gunicorn timeout
-                    # 心跳：若暂时无新帧，周期性发送保活片段以避免 Gunicorn 超时
+                    # If no progress for too long, break to trigger client reconnection
+                    # 若长时间无新帧，断开以触发客户端重连
+                    if time.time() - last_progress_ts > stall_timeout:
+                        logging.warning("MJPEG stall detected on server (>4s no new frames). Closing stream to trigger reconnect.")
+                        break
+                    # Heartbeat: resend the latest JPEG frame as keepalive to prevent worker timeout
+                    # 心跳：重发最近的JPEG帧作为保活，避免 Gunicorn 超时且不破坏浏览器解码
                     now_ts = time.time()
                     if now_ts - last_send_ts >= heartbeat_interval:
                         last_send_ts = now_ts
-                        yield (b"--" + boundary.encode() + b"\r\n"
-                               b"Content-Type: text/plain\r\n"
-                               b"Cache-Control: no-cache\r\n\r\n"
-                               b"keepalive\r\n")
+                        latest = stream_processor.get_latest_frame() if stream_processor else None
+                        if latest:
+                            timestamp = str(int(time.time() * 1000))
+                            yield (b"--" + boundary.encode() + b"\r\n"
+                                   b"Content-Type: image/jpeg\r\n"
+                                   b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                                   b"Pragma: no-cache\r\n"
+                                   b"Expires: 0\r\n"
+                                   b"X-Timestamp: " + timestamp.encode() + b"\r\n"
+                                   b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
+                                   b"Content-Length: " + str(len(latest)).encode() + b"\r\n\r\n" + latest + b"\r\n")
+                        else:
+                            time.sleep(0.05)
                     else:
                         # Brief sleep to avoid busy loop
                         time.sleep(0.05)

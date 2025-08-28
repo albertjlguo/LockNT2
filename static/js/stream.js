@@ -12,6 +12,9 @@ class StreamManager {
         this.currentStream = null;
         this.detectionInterval = null;
         this.statusInterval = null;
+        // Backend stall monitoring / 后端卡顿监控
+        this.lastBackendFrameCount = 0;
+        this.lastBackendProgressTs = 0;
         
         // Frame state (used for detection source)
         // 帧状态（检测输入源）
@@ -805,6 +808,32 @@ class StreamManager {
         
         if (frameCountElement) {
             frameCountElement.textContent = status.frame_count || 0;
+        }
+
+        // Stall detection based on backend frame_count
+        // 基于后端 frame_count 的卡顿检测：超过4秒未前进则重启 MJPEG
+        if (this.isActive && typeof status.frame_count === 'number') {
+            const nowTs = Date.now();
+            if (status.frame_count > this.lastBackendFrameCount) {
+                this.lastBackendFrameCount = status.frame_count;
+                this.lastBackendProgressTs = nowTs;
+            } else {
+                if (!this.lastBackendProgressTs) this.lastBackendProgressTs = nowTs;
+                const elapsed = (nowTs - this.lastBackendProgressTs) / 1000;
+                if (elapsed > 4) {
+                    // Restart MJPEG to recover from potential stall
+                    // 重启 MJPEG 以从可能的卡顿中恢复
+                    if (!this._stopping) {
+                        console.warn('Backend frame_count stalled >4s; restarting MJPEG stream');
+                        this.stopMjpegStream();
+                        // small delay to avoid hammering
+                        setTimeout(() => {
+                            if (this.isActive && !this._stopping) this.startMjpegStream();
+                        }, 300);
+                    }
+                    this.lastBackendProgressTs = nowTs;
+                }
+            }
         }
     }
 

@@ -26,7 +26,7 @@ class StreamProcessor:
         
         # Frame buffer for smoother streaming
         # 帧缓冲区以实现更流畅的流媒体传输
-        self.frame_buffer = deque(maxlen=3)  # Small buffer to reduce latency
+        self.frame_buffer = deque(maxlen=16)  # User preference: moderate buffer for smoother playback
         self.buffer_lock = threading.Lock()
         
         # Performance monitoring
@@ -139,6 +139,7 @@ class StreamProcessor:
                 self._fps_window_start = time.time()
                 self._fps_window_count = 0
                 consecutive_failures = 0
+                last_success_time = time.time()
                 max_consecutive_failures = 10
                 
                 while self.is_running:
@@ -158,6 +159,7 @@ class StreamProcessor:
                         
                         # Reset failure counter on successful read
                         consecutive_failures = 0
+                        last_success_time = time.time()
                         
                         # Validate frame
                         if frame is None or frame.size == 0:
@@ -178,8 +180,8 @@ class StreamProcessor:
                         
                         # Resize frame for processing
                         height, width = frame.shape[:2]
-                        if width > 1280:
-                            scale = 1280 / width
+                        if width > 960:
+                            scale = 960 / width
                             new_width = int(width * scale)
                             new_height = int(height * scale)
                             frame = cv2.resize(frame, (new_width, new_height))
@@ -187,9 +189,9 @@ class StreamProcessor:
                         # Encode frame as JPEG with optimized settings
                         # 使用优化设置编码JPEG帧
                         encode_params = [
-                            cv2.IMWRITE_JPEG_QUALITY, 75,  # Reduced quality for better performance
-                            cv2.IMWRITE_JPEG_OPTIMIZE, 1,  # Enable JPEG optimization
-                            cv2.IMWRITE_JPEG_PROGRESSIVE, 1  # Progressive JPEG for better streaming
+                            cv2.IMWRITE_JPEG_QUALITY, 65,  # Lower quality for reduced CPU/bandwidth
+                            cv2.IMWRITE_JPEG_OPTIMIZE, 0,  # Disable heavy optimization to save CPU
+                            cv2.IMWRITE_JPEG_PROGRESSIVE, 0  # Disable progressive to reduce latency
                         ]
                         success, buffer = cv2.imencode('.jpg', frame, encode_params)
                         
@@ -219,11 +221,23 @@ class StreamProcessor:
                         
                         # Adaptive frame rate control for smoother streaming
                         # 自适应帧率控制以提升流畅度
-                        target_fps = 30  # Reduced from 60 for better stability
+                        # Adaptive FPS: lower when processing is slow to prevent backlog
+                        # 自适应FPS：处理慢时降低帧率，避免堆积
+                        target_fps = 24  # base lower fps for stability
+                        if processing_time > 1.0 / 22:
+                            target_fps = 20
+                        if processing_time > 1.0 / 18:
+                            target_fps = 18
                         frame_time = 1.0 / target_fps
                         processing_time = time.time() - now
                         sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep
                         time.sleep(sleep_time)
+
+                        # Stall detection: if no successful frame for >3s, reconnect
+                        # 卡顿检测：若超过3秒无成功帧，触发重连
+                        if time.time() - last_success_time > 3.0:
+                            logging.error("Frame stall detected (>3s with no frames), reconnecting...")
+                            break
                         
                     except Exception as frame_error:
                         logging.error(f"Error processing frame: {str(frame_error)}")
