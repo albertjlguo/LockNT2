@@ -862,8 +862,9 @@
       } else {
         // Standard mode: detection-first association
         // 标准模式：检测优先关联
-        this._associateAndUpdate(locked, enriched, unmatchedDetIdx, true);
-        this._associateAndUpdate(normal, enriched, unmatchedDetIdx, false);
+        // Use Hungarian for both locked and normal tracks for optimal assignment
+        this._associateAndUpdateHungarian(locked, enriched, unmatchedDetIdx, true);
+        this._associateAndUpdateHungarian(normal, enriched, unmatchedDetIdx, false);
       }
 
       // Increase lost for unmatched tracks
@@ -1475,7 +1476,7 @@
                 (activeTrack.cx - (det.x + det.w/2))**2 + 
                 (activeTrack.cy - (det.y + det.h/2))**2
               );
-              if (activeDistance < pair.distance * 0.7) { // Active track is much closer
+              if (activeDistance < distance * 0.7) { // Active track is much closer
                 conflictingActiveTrack = true;
                 break;
               }
