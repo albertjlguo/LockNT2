@@ -2,7 +2,7 @@ modules = ["python-3.11"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["file", "libGL", "libGLU", "lsof", "openssl", "postgresql"]
+packages = ["libGL", "libGLU", "openssl", "postgresql", "lsof", "file"]
 
 [deployment]
 deploymentTarget = "autoscale"

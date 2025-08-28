@@ -540,9 +540,8 @@ class StreamManager {
         }
 
         try {
-            // 运行检测 - Use YOLOv11 if available / 使用YOLOv11（如果可用）
-            const detectionManager = window.yolov11DetectionManager || window.detectionManager;
-            const predictions = await detectionManager.detectObjects(this.frameImage);
+            // 运行检测
+            const predictions = await window.detectionManager.detectObjects(this.frameImage);
 
             // 精确的坐标缩放处理，确保检测框与显示一致
             // Precise coordinate scaling to ensure detection boxes match display
@@ -723,11 +722,10 @@ class StreamManager {
         }
 
         let id = this.tracker.lockFromPoint(x, y, this.lastScaledPredictions || [], this.videoContext);
-        const detectionManager = window.yolov11DetectionManager || window.detectionManager;
-        if (!id && this.frameImage && detectionManager && detectionManager.isModelLoaded) {
+        if (!id && this.frameImage && window.detectionManager && window.detectionManager.isModelLoaded) {
             // One-shot detection fallback to ensure immediate lock on click
             try {
-                const predictions = await detectionManager.detectObjects(this.frameImage);
+                const predictions = await window.detectionManager.detectObjects(this.frameImage);
                 const scaleX2 = this.detectionCanvas.width / (this.frameImage?.naturalWidth || this.detectionCanvas.width);
                 const scaleY2 = this.detectionCanvas.height / (this.frameImage?.naturalHeight || this.detectionCanvas.height);
                 const scaled = predictions.map(p => {
