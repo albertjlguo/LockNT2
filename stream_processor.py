@@ -35,29 +35,17 @@ class StreamProcessor:
         self.dropped_frames = 0
 
     def validate_stream(self):
-        """Validate if the YouTube URL is accessible and is a live stream."""
+        """Validate if the YouTube URL is actually retrievable for playback.
+        通过尝试获取直链来验证能否实际播放。
+        """
         try:
-            # Use yt-dlp to get stream info
-            cmd = ['yt-dlp', '--dump-json', '--no-download', self.youtube_url]
-            if os.path.exists('cookies.txt'):
-                cmd.extend(['--cookies', 'cookies.txt'])
-                logging.info("Using local cookies.txt file for validation.")
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode != 0:
-                error_output = result.stderr.strip()
-                logging.error(f"yt-dlp error: {error_output}")
-                return False, error_output or "yt-dlp returned a non-zero exit code."
-            
-            info = json.loads(result.stdout)
-            
-            # Check if it's a live stream
-            is_live = info.get('is_live', False)
-            if not is_live:
-                logging.warning("URL may not be a live stream, but attempting to process anyway")
-            
-            return True, "Stream is valid."
+            # Prefer testing real playback capability via get_stream_url
+            # 优先通过获取直链验证实际播放能力
+            stream_url = self.get_stream_url()
+            if stream_url:
+                return True, "Stream is valid."
+            else:
+                return False, "Unable to retrieve direct stream URL via yt-dlp."
             
         except subprocess.TimeoutExpired:
             logging.error("Timeout while validating stream")
@@ -69,21 +57,39 @@ class StreamProcessor:
     def get_stream_url(self):
         """Get the direct stream URL using yt-dlp."""
         try:
-            cmd = ['yt-dlp', '--get-url', '--format', 'best[height<=720]', self.youtube_url]
+            base_cmd = ['yt-dlp', '--get-url', '--format', 'best[height<=720]/best', self.youtube_url]
+            attempts = []
+            # 1) With cookies if available
             if os.path.exists('cookies.txt'):
-                cmd.extend(['--cookies', 'cookies.txt'])
+                attempts.append(base_cmd + ['--cookies', 'cookies.txt'])
                 logging.info("Using local cookies.txt file for getting stream URL.")
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode != 0:
-                logging.error(f"yt-dlp error getting URL: {result.stderr}")
-                return None
-            
-            stream_url = result.stdout.strip()
-            logging.info(f"Got stream URL: {stream_url[:100]}...")
-            return stream_url
-            
+            # 2) Try different player clients (some bypass additional checks)
+            attempts.append(base_cmd + ['--extractor-args', 'youtube:player_client=android'])
+            attempts.append(base_cmd + ['--extractor-args', 'youtube:player_client=ios'])
+            # 3) Last fallback: no cookies, default client
+            attempts.append(base_cmd)
+
+            for idx, cmd in enumerate(attempts, 1):
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    if result.returncode == 0 and result.stdout.strip():
+                        stream_url = result.stdout.strip()
+                        logging.info(f"Got stream URL (attempt {idx}): {stream_url[:100]}...")
+                        return stream_url
+                    else:
+                        err = (result.stderr or "").strip()
+                        if err:
+                            logging.error(f"yt-dlp error getting URL (attempt {idx}): {err}")
+                        # Detect bot-check/auth requirement and stop early to avoid endless retries
+                        if 'Sign in to confirm you’re not a bot' in err or 'confirm you\u2019re not a bot' in err:
+                            logging.error("YouTube requires authentication or bot confirmation. Provide cookies.txt or use authenticated environment.")
+                            return None
+                except subprocess.TimeoutExpired:
+                    logging.error(f"yt-dlp timeout getting URL (attempt {idx})")
+                except Exception as inner:
+                    logging.error(f"Error running yt-dlp (attempt {idx}): {inner}")
+            return None
+        
         except Exception as e:
             logging.error(f"Error getting stream URL: {str(e)}")
             return None
@@ -249,6 +255,9 @@ class StreamProcessor:
                     self.cap.release()
                     self.cap = None
         
+        # Mark processor as no longer running before cleanup so routes see the correct state
+        # 在清理之前将处理器标记为未运行，以便路由能正确感知状态
+        self.is_running = False
         self.cleanup()
         logging.info("Stream processing stopped")
     

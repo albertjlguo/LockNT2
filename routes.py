@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 # Global stream processor instance
 stream_processor = None
 processing_thread = None
-is_processing = False
+is_processing = False  # Legacy flag; active state should prefer stream_processor.is_running
 
 @app.route('/')
 def index():
@@ -77,7 +77,7 @@ def stream_status():
     """Get current stream processing status."""
     global stream_processor, is_processing
     
-    if not is_processing or not stream_processor:
+    if not stream_processor or not getattr(stream_processor, 'is_running', False):
         return jsonify({
             'active': False,
             'url': None,
@@ -97,7 +97,7 @@ def video_feed():
     """Get current video frame as JPEG image."""
     global stream_processor
     
-    if not stream_processor or not is_processing:
+    if not stream_processor or not getattr(stream_processor, 'is_running', False):
         return Response("No active stream", status=404)
     
     frame = stream_processor.get_latest_frame()
@@ -113,7 +113,7 @@ def video_feed_mjpeg():
     """
     global stream_processor
 
-    if not stream_processor or not is_processing:
+    if not stream_processor or not getattr(stream_processor, 'is_running', False):
         return Response("No active stream", status=404)
 
     def generate():
@@ -122,7 +122,9 @@ def video_feed_mjpeg():
         frame_skip_count = 0
         max_skip_frames = 2  # Skip at most 2 frames to maintain smoothness
         
-        while is_processing and stream_processor:
+        last_send_ts = time.time()
+        heartbeat_interval = 2.0  # seconds; send a keepalive chunk to prevent worker timeout
+        while stream_processor and getattr(stream_processor, 'is_running', False):
             try:
                 # Use buffered frame with age limit for smoother delivery
                 # 使用带年龄限制的缓冲帧以实现更流畅的传输
@@ -156,21 +158,25 @@ def video_feed_mjpeg():
                            b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
                            b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
                 else:
-                    # Non-blocking frame waiting - yield control instead of sleep
-                    # 非阻塞帧等待 - 让出控制权而非休眠
-                    # Use a very short yield to prevent busy waiting while avoiding worker timeout
-                    # 使用极短的让出以防止忙等待，同时避免worker超时
-                    import threading
-                    threading.Event().wait(0.001)  # Non-blocking minimal wait
+                    # Heartbeat: if no new frame for a while, send a small keepalive chunk to avoid Gunicorn timeout
+                    # 心跳：若暂时无新帧，周期性发送保活片段以避免 Gunicorn 超时
+                    now_ts = time.time()
+                    if now_ts - last_send_ts >= heartbeat_interval:
+                        last_send_ts = now_ts
+                        yield (b"--" + boundary.encode() + b"\r\n"
+                               b"Content-Type: text/plain\r\n"
+                               b"Cache-Control: no-cache\r\n\r\n"
+                               b"keepalive\r\n")
+                    else:
+                        # Brief sleep to avoid busy loop
+                        time.sleep(0.05)
                     
             except GeneratorExit:
                 break
             except Exception as e:
                 logging.error(f"Error in enhanced MJPEG generator: {e}")
-                # Use non-blocking recovery pause to prevent worker timeout
-                # 使用非阻塞恢复暂停以防止worker超时
-                import threading
-                threading.Event().wait(0.005)  # Brief non-blocking recovery pause
+                # Brief pause to avoid tight loop
+                time.sleep(0.05)
 
     return Response(generate(), 
                     mimetype='multipart/x-mixed-replace; boundary=frame',
