@@ -10,8 +10,7 @@ dependencies = [
     "yt-dlp>=2025.8.22",
     "numpy>=1.23.0",
     "pillow>=7.1.2",
-    "ultralytics>=8.3.0",
 ]
 
-# Clean configuration without heavy PyTorch dependencies
-# YOLOv11 runs in browser using TensorFlow.js instead
+# 轻量级配置，无重型依赖项
+# YOLOv11使用服务器端增强检测

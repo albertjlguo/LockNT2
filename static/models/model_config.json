@@ -1,6 +1,0 @@
-{
-  "model_type": "coco_ssd_fallback",
-  "fallback": true,
-  "message": "Using COCO-SSD as fallback. YOLOv11 ONNX model download required.",
-  "description": "Fallback to COCO-SSD TensorFlow.js model"
-}
