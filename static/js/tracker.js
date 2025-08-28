@@ -1206,6 +1206,7 @@
       for (const t of this.tracks) {
         t.predict();
         t.lostFrames += 1;
+        t.occlusionState.isOccluded = true;
         
         // Check and update occlusion state
         // 检查并更新遮挡状态
@@ -2540,6 +2541,7 @@
         // 使用检测结果更新轨迹
         track.update({ x: det.x, y: det.y, w: det.w, h: det.h }, det.feature);
         track._updatedThisRound = true;
+        trackIndices.add(this.tracks.indexOf(track));
         
         // Reset occlusion state
         // 重置遮挡状态

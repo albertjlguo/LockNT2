@@ -390,8 +390,8 @@ class ObjectDetectionManager {
             // Perspective scaling factors
             // 透视缩放因子
             perspectiveStrength: 0.47,  // How strong the perspective effect is (tuned down from 0.7)
-            minScale: 0.2,             // Minimum scale factor (0.3)
-            maxScale: 0.1              // Maximum scale factor (2.0)
+            minScale: 0.1,             // Minimum scale factor (0.3)
+            maxScale: 0.2              // Maximum scale factor (2.0)
         };
     }
     
