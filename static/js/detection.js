@@ -13,11 +13,11 @@ class ObjectDetectionManager {
             recentDetections: []
         };
         
-        // Configurable confidence thresholds
-        // 可配置的置信度阈值
+        // 优化的置信度阈值 - 降低以捕获更多有效检测
+        // Optimized confidence thresholds - lowered to capture more valid detections
         this.confidenceThresholds = {
-            person: 0.5,  // 50%
-            car: 0.5      // 50%
+            person: 0.35,  // 降低到35%以捕获更多人物检测
+            car: 0.40      // 降低到40%以捕获更多汽车检测
         };
         
         this.initializeConfidenceControls();
@@ -64,9 +64,11 @@ class ObjectDetectionManager {
         try {
             this.updateModelStatus('loading', 'Loading AI Model...');
             
-            // Load the COCO-SSD model
+            // 加载优化的COCO-SSD模型配置
+            // Load optimized COCO-SSD model configuration
             this.model = await cocoSsd.load({
-              base: 'lite_mobilenet_v2'
+              base: 'mobilenet_v2', // 使用更准确的mobilenet_v2而非lite版本
+              modelUrl: undefined   // 使用默认URL以获得最佳性能
             });
             this.isModelLoaded = true;
             
@@ -173,25 +175,75 @@ class ObjectDetectionManager {
                 return null;
             }
             
-            // Apply class-specific confidence filtering
-            // 应用针对类别的置信度过滤
-            const minConfidence = this.confidenceThresholds[pred.class] || 0.3;
+            // 动态置信度调整 - 根据目标大小和位置调整阈值
+            // Dynamic confidence adjustment - adjust threshold based on target size and position
+            let minConfidence = this.confidenceThresholds[pred.class] || 0.3;
+            
+            // 根据目标大小调整置信度阈值
+            // Adjust confidence threshold based on target size
+            const targetArea = pred.bbox[2] * pred.bbox[3];
+            const imageArea = imageWidth * imageHeight;
+            const sizeRatio = targetArea / imageArea;
+            
+            if (sizeRatio < 0.01) {
+                // 小目标：降低阈值
+                // Small targets: lower threshold
+                minConfidence = Math.max(0.25, minConfidence - 0.1);
+            } else if (sizeRatio > 0.25) {
+                // 大目标：提高阈值
+                // Large targets: raise threshold
+                minConfidence = Math.min(0.6, minConfidence + 0.05);
+            }
+            
+            // 根据目标位置调整（边缘目标通常置信度较低）
+            // Adjust based on target position (edge targets usually have lower confidence)
+            const centerX = pred.bbox[0] + pred.bbox[2] / 2;
+            const centerY = pred.bbox[1] + pred.bbox[3] / 2;
+            const distFromCenter = Math.sqrt(
+                Math.pow((centerX - imageWidth/2) / (imageWidth/2), 2) + 
+                Math.pow((centerY - imageHeight/2) / (imageHeight/2), 2)
+            );
+            
+            if (distFromCenter > 0.7) {
+                // 边缘目标：降低阈值
+                // Edge targets: lower threshold
+                minConfidence = Math.max(0.2, minConfidence - 0.08);
+            }
+            
             if (pred.score < minConfidence) return null;
             
-            // Validate original bbox coordinates
-            // 验证原始边界框坐标
+            // 改进的坐标验证 - 支持部分可见目标
+            // Improved coordinate validation - support partially visible targets
             const [x, y, w, h] = pred.bbox;
-            if (x < 0 || y < 0 || w <= 0 || h <= 0 || 
-                x + w > imageWidth || y + h > imageHeight) {
-                console.warn('Invalid bbox coordinates:', pred.bbox, 'Image size:', imageWidth, 'x', imageHeight);
-                // Clamp to valid range
-                const clampedBbox = [
-                    Math.max(0, Math.min(x, imageWidth - 1)),
-                    Math.max(0, Math.min(y, imageHeight - 1)),
-                    Math.max(1, Math.min(w, imageWidth - Math.max(0, x))),
-                    Math.max(1, Math.min(h, imageHeight - Math.max(0, y)))
-                ];
-                pred.bbox = clampedBbox;
+            
+            // 检查边界框是否完全无效
+            // Check if bbox is completely invalid
+            if (w <= 0 || h <= 0) {
+                console.warn('Invalid bbox dimensions:', pred.bbox);
+                return null; // 完全无效的框直接丢弃
+            }
+            
+            // 计算目标在图像内的可见比例
+            // Calculate visible ratio of target within image
+            const visibleX = Math.max(0, Math.min(x + w, imageWidth) - Math.max(0, x));
+            const visibleY = Math.max(0, Math.min(y + h, imageHeight) - Math.max(0, y));
+            const visibleArea = visibleX * visibleY;
+            const totalArea = w * h;
+            const visibleRatio = visibleArea / totalArea;
+            
+            // 如果可见比例太小，丢弃检测
+            // Discard detection if visible ratio is too small
+            if (visibleRatio < 0.3) {
+                console.log(`Discarding detection with low visibility: ${(visibleRatio * 100).toFixed(1)}%`);
+                return null;
+            }
+            
+            // 对于部分可见的目标，保持原始坐标但添加标记
+            // For partially visible targets, keep original coordinates but add flag
+            if (x < 0 || y < 0 || x + w > imageWidth || y + h > imageHeight) {
+                pred.partiallyVisible = true;
+                pred.visibleRatio = visibleRatio;
+                console.log(`Partially visible target detected: ${(visibleRatio * 100).toFixed(1)}% visible`);
             }
             
             // Apply conservative bounding box optimization
@@ -235,40 +287,48 @@ class ObjectDetectionManager {
             return bbox; // Return original if invalid
         }
         
-        // Conservative adjustments to maintain accuracy
-        // 保守的调整以维持准确性
-        let adjustmentFactor = 1.0;
-        let paddingRatio = 0.02; // Reduced padding for better accuracy
+        // 大幅减少边界框调整，保持原始检测结果的准确性
+        // Significantly reduce bbox adjustments to maintain original detection accuracy
+        let adjustmentFactor = 1.0; // 默认不调整
+        let paddingRatio = 0.0; // 移除不必要的填充
         
-        switch (objectClass) {
-            case 'person':
-                // Minimal adjustment for persons to maintain detection accuracy
-                // 对人物进行最小调整以维持检测准确性
-                adjustmentFactor = confidence > 0.8 ? 0.98 : 1.0;
-                paddingRatio = 0.01;
-                break;
-            case 'car':
-                // Slight tightening for cars only when high confidence
-                // 仅在高置信度时对汽车进行轻微收紧
-                adjustmentFactor = confidence > 0.8 ? 0.97 : 1.0;
-                paddingRatio = 0.015;
-                break;
-            default:
-                // No adjustment for unknown classes
-                // 未知类别不进行调整
-                adjustmentFactor = 1.0;
-                paddingRatio = 0.01;
+        // 只对高置信度检测进行微调
+        // Only fine-tune high-confidence detections
+        if (confidence > 0.85) {
+            switch (objectClass) {
+                case 'person':
+                    // 对人物检测几乎不调整
+                    // Minimal adjustment for person detection
+                    adjustmentFactor = 1.0; // 保持原始大小
+                    paddingRatio = 0.0;
+                    break;
+                case 'car':
+                    // 对汽车检测几乎不调整
+                    // Minimal adjustment for car detection
+                    adjustmentFactor = 1.0; // 保持原始大小
+                    paddingRatio = 0.0;
+                    break;
+                default:
+                    // 其他类别完全不调整
+                    // No adjustment for other classes
+                    adjustmentFactor = 1.0;
+                    paddingRatio = 0.0;
+            }
         }
         
-        // Apply conservative adjustments
-        // 应用保守的调整
+        // 如果不需要调整，直接返回原始边界框
+        // Return original bbox if no adjustment needed
+        if (adjustmentFactor === 1.0 && paddingRatio === 0.0) {
+            return bbox;
+        }
+        
+        // Apply minimal adjustments only when necessary
+        // 仅在必要时应用最小调整
         const centerX = x + width / 2;
         const centerY = y + height / 2;
         const newWidth = width * adjustmentFactor;
         const newHeight = height * adjustmentFactor;
         
-        // Add minimal padding for stability without affecting accuracy
-        // 添加最小填充以提高稳定性而不影响准确性
         const paddedWidth = newWidth * (1 + paddingRatio);
         const paddedHeight = newHeight * (1 + paddingRatio);
         
