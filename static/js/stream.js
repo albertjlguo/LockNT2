@@ -32,7 +32,7 @@ class StreamManager {
             focusClasses: ['person'],
             autoCreate: false
         });
-        this.detectEveryMs = 150; // Increased detection frequency for smoother tracking 提高检测频率以实现更流畅的追踪
+        this.detectEveryMs = 300; // Reduced detection frequency for locked targets 降低检测频率，锁定目标主要依赖追踪
         this.lastDetectionTime = 0;
         this.lastScaledPredictions = [];
         this.debug = false; // 控制调试日志开关
@@ -482,10 +482,30 @@ class StreamManager {
             return;
         }
         
-        // Enhanced detection throttling with frame skipping for better performance
-        // 增强的检测节流机制，支持跳帧以提升性能
+        // Smart detection throttling based on locked targets
+        // 基于锁定目标的智能检测节流
         const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-        const shouldDetect = !this.lastDetectionTime || (now - this.lastDetectionTime >= this.detectEveryMs);
+        const lockedTracks = this.tracker ? this.tracker.getTracks().filter(t => t.locked) : [];
+        
+        // Adaptive detection frequency: slower when targets are locked and stable
+        // 自适应检测频率：锁定目标稳定时降低检测频率
+        let adaptiveDetectInterval = this.detectEveryMs;
+        if (lockedTracks.length > 0) {
+            const avgStability = lockedTracks.reduce((sum, t) => {
+                const stability = Math.min(1.0, (t.hits - t.lostFrames) / Math.max(1, t.hits));
+                return sum + stability;
+            }, 0) / lockedTracks.length;
+            
+            // Stable locked targets need less frequent detection
+            // 稳定的锁定目标需要更低频率的检测
+            if (avgStability > 0.8) {
+                adaptiveDetectInterval = this.detectEveryMs * 2; // 600ms for stable targets
+            } else if (avgStability > 0.6) {
+                adaptiveDetectInterval = this.detectEveryMs * 1.5; // 450ms for moderately stable
+            }
+        }
+        
+        const shouldDetect = !this.lastDetectionTime || (now - this.lastDetectionTime >= adaptiveDetectInterval);
 
         if (!shouldDetect) {
             // Use lightweight prediction-only updates for non-detection frames
@@ -523,9 +543,13 @@ class StreamManager {
             });
             this.lastScaledPredictions = scaled;
 
-            // 更新追踪器（传入视频画布上下文以提取外观特征）
+            // Smart tracker update: locked targets use tracking-first mode
+            // 智能追踪器更新：锁定目标使用追踪优先模式
             if (this.tracker && this.videoContext) {
-                this.tracker.update(scaled, this.videoContext);
+                this.tracker.update(scaled, this.videoContext, {
+                    trackingFirstMode: true, // Prioritize tracking over detection for locked targets
+                    lockedTargetDetectionWeight: 0.3 // Reduce detection influence for locked targets
+                });
             }
 
             // 仅绘制追踪框（不显示检测框），只在有锁定目标时重绘

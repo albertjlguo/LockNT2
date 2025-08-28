@@ -524,7 +524,11 @@
     }
 
     /** Main update with detections (canvas-space bboxes). ctx is 2D context for appearance. */
-    update(detections, ctx) {
+    update(detections, ctx, options = {}) {
+      // Extract tracking-first mode options
+      // 提取追踪优先模式选项
+      const trackingFirstMode = options.trackingFirstMode || false;
+      const lockedTargetDetectionWeight = options.lockedTargetDetectionWeight || 1.0;
       // Prepare detection objects
       const dets = (detections || []).map(d => ({
         x: d.bbox[0] ?? d.bbox.x ?? d.x,
@@ -553,16 +557,26 @@
       // Predict existing tracks first
       for (const t of this.tracks) t.predict();
 
-      // Associate in two passes: locked tracks first, then others
+      // Smart association strategy based on tracking mode
+      // 基于追踪模式的智能关联策略
       const locked = this.tracks.filter(t => t.locked);
       const normal = this.tracks.filter(t => !t.locked);
 
       const unmatchedDetIdx = new Set(enriched.map((_, i) => i));
 
-      // Pass 1: locked tracks with strict association
-      this._associateAndUpdate(locked, enriched, unmatchedDetIdx, true);
-      // Pass 2: normal tracks
-      this._associateAndUpdate(normal, enriched, unmatchedDetIdx, false);
+      if (trackingFirstMode && locked.length > 0) {
+        // Tracking-first mode: locked targets rely more on prediction
+        // 追踪优先模式：锁定目标更依赖预测
+        this._associateAndUpdateTrackingFirst(locked, enriched, unmatchedDetIdx, lockedTargetDetectionWeight);
+        // Normal tracks still use detection-based association
+        // 普通轨迹仍使用检测为主的关联
+        this._associateAndUpdate(normal, enriched, unmatchedDetIdx, false);
+      } else {
+        // Standard mode: detection-first association
+        // 标准模式：检测优先关联
+        this._associateAndUpdate(locked, enriched, unmatchedDetIdx, true);
+        this._associateAndUpdate(normal, enriched, unmatchedDetIdx, false);
+      }
 
       // Increase lost for unmatched tracks
       for (const t of this.tracks) {
@@ -585,6 +599,99 @@
       }
 
       this._prune();
+    }
+
+    /** Tracking-first association for locked targets - prioritizes prediction over detection */
+    _associateAndUpdateTrackingFirst(trackList, detections, unmatchedDetIdx, detectionWeight = 0.3) {
+      if (trackList.length === 0) return;
+      
+      // For locked tracks in tracking-first mode, we primarily rely on prediction
+      // 对于追踪优先模式下的锁定轨迹，主要依赖预测
+      for (const track of trackList) {
+        // Check if track is stable enough to ignore detections
+        // 检查轨迹是否稳定到可以忽略检测
+        const stability = Math.min(1.0, (track.hits - track.lostFrames) / Math.max(1, track.hits));
+        const trackAge = Math.min(1.0, track.hits / 20);
+        const confidenceFactor = stability * trackAge;
+        
+        // Very stable tracks can ignore detections completely
+        // 非常稳定的轨迹可以完全忽略检测
+        if (confidenceFactor > 0.85 && track.lostFrames === 0) {
+          // Pure tracking update - no detection influence
+          // 纯追踪更新 - 不受检测影响
+          track._updatedThisRound = true;
+          continue;
+        }
+        
+        // For less stable tracks, find best detection match with reduced weight
+        // 对于稳定性较低的轨迹，寻找最佳检测匹配但降低权重
+        let bestMatch = null;
+        let bestCost = Infinity;
+        
+        const tb = track.bbox;
+        const gating = Math.max(this.gatingBase, 0.8 * Math.hypot(track.w, track.h));
+        
+        for (const detIdx of unmatchedDetIdx) {
+          const det = detections[detIdx];
+          const db = { x: det.x, y: det.y, w: det.w, h: det.h };
+          
+          const ctr = centerDistance(tb, db);
+          if (ctr > gating * 2.0) continue; // Generous gating for locked tracks
+          
+          // Simplified cost focusing on motion consistency
+          // 简化成本，专注于运动一致性
+          const predictedX = track.cx + (track.vx || 0) / 30;
+          const predictedY = track.cy + (track.vy || 0) / 30;
+          const detCenterX = det.x + det.w / 2;
+          const detCenterY = det.y + det.h / 2;
+          const motionDist = Math.sqrt((predictedX - detCenterX) ** 2 + (predictedY - detCenterY) ** 2);
+          
+          // Cost based primarily on motion prediction
+          // 主要基于运动预测的成本
+          const cost = motionDist / gating;
+          
+          if (cost < bestCost && cost < 0.8) { // Permissive threshold
+            bestCost = cost;
+            bestMatch = { detIdx, detection: det };
+          }
+        }
+        
+        if (bestMatch) {
+          // Weighted update: blend prediction with detection
+          // 加权更新：混合预测和检测
+          const det = bestMatch.detection;
+          const predWeight = 1.0 - detectionWeight;
+          
+          // Blend predicted and detected positions
+          // 混合预测和检测位置
+          const predX = track.cx + (track.vx || 0) / 30;
+          const predY = track.cy + (track.vy || 0) / 30;
+          const detX = det.x + det.w / 2;
+          const detY = det.y + det.h / 2;
+          
+          const blendedX = predWeight * predX + detectionWeight * detX;
+          const blendedY = predWeight * predY + detectionWeight * detY;
+          const blendedW = predWeight * track.w + detectionWeight * det.w;
+          const blendedH = predWeight * track.h + detectionWeight * det.h;
+          
+          // Update with blended values
+          // 使用混合值更新
+          const blendedBbox = {
+            x: blendedX - blendedW / 2,
+            y: blendedY - blendedH / 2,
+            w: blendedW,
+            h: blendedH
+          };
+          
+          track.update(blendedBbox, det.feature);
+          track._updatedThisRound = true;
+          unmatchedDetIdx.delete(bestMatch.detIdx);
+        } else {
+          // No good detection match - rely purely on tracking
+          // 没有好的检测匹配 - 纯依赖追踪
+          track._updatedThisRound = true;
+        }
+      }
     }
 
     /** Enhanced association with occlusion-aware matching */
@@ -707,12 +814,8 @@
         
         // More permissive thresholds for different track states
         // 针对不同轨迹状态的更宽松阈值
-        if (track.occlusionState && track.occlusionState.isOccluded) {
-          threshold *= 1.4; // More permissive during occlusion
-        }
-        if (track.locked) {
-          threshold *= 1.3; // More permissive for locked tracks
-        }
+        if (track.occlusionState && track.occlusionState.isOccluded) threshold *= 1.4;
+        if (track.locked) threshold *= 1.3; // More permissive for locked tracks
         
         // Track age adjustment - newer tracks get stricter thresholds
         // 轨迹年龄调整 - 新轨迹使用更严格的阈值
