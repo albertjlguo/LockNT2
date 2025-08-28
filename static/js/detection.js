@@ -55,6 +55,7 @@ class ObjectDetectionManager {
             confidenceBoost: 0.1
         };
         
+        this.isDetecting = false; // Add a flag to prevent concurrent detections
         this.initializeConfidenceControls();
     }
 
@@ -265,10 +266,11 @@ class ObjectDetectionManager {
      * Object detection using the ONNX YOLO model.
      */
     async detectObjects(videoElement) {
-        if (!this.isModelLoaded || !this.model) {
-            console.warn('Model not loaded yet');
+        if (!this.isModelLoaded || !this.model || this.isDetecting) {
             return [];
         }
+
+        this.isDetecting = true;
 
         try {
             // 1. Preprocess the frame
@@ -297,6 +299,8 @@ class ObjectDetectionManager {
         } catch (error) {
             console.error('Error during ONNX object detection:', error);
             return [];
+        } finally {
+            this.isDetecting = false; // Release the lock
         }
     }
     
