@@ -364,12 +364,13 @@
       this.cy = bbox.y + bbox.h / 2;
       this.w = bbox.w; this.h = bbox.h;
       this.vx = 0; this.vy = 0;
-      // Use Kalman filter for motion prediction instead of simple alpha-beta
+      // Use optimized Kalman filter for motion prediction
+      // 使用优化的卡尔曼滤波器进行运动预测
       this.useKalmanFilter = true;
       this.kalmanFilter = new KalmanFilter(bbox, {
-        processNoise: 2.0,
-        measurementNoise: 8.0,
-        velocityNoise: 10.0
+        processNoise: 1.5,      // Reduced for smoother tracking
+        measurementNoise: 5.0,  // Reduced to trust measurements more
+        velocityNoise: 8.0      // Reduced for more stable velocity estimates
       });
       
       // Keep legacy parameters for fallback

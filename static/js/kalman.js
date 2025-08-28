@@ -15,10 +15,11 @@ class KalmanFilter {
         this.stateDim = 6;
         this.measureDim = 4;
         
-        // Configuration parameters
-        this.processNoise = options.processNoise || 2.0;
-        this.measurementNoise = options.measurementNoise || 8.0;
-        this.velocityNoise = options.velocityNoise || 10.0;
+        // Optimized configuration parameters for better tracking
+        // 优化的配置参数以获得更好的追踪效果
+        this.processNoise = options.processNoise || 1.5;      // Reduced for smoother prediction
+        this.measurementNoise = options.measurementNoise || 5.0; // Reduced to trust measurements more
+        this.velocityNoise = options.velocityNoise || 8.0;    // Reduced for more stable velocity estimates
         
         // Initialize state vector [x, y, vx, vy, w, h]
         this.state = new Float32Array([
@@ -81,12 +82,14 @@ class KalmanFilter {
     createProcessNoiseMatrix() {
         const Q = new Float32Array(this.stateDim * this.stateDim);
         
-        Q[0 * this.stateDim + 0] = this.processNoise; // x
-        Q[1 * this.stateDim + 1] = this.processNoise; // y
-        Q[2 * this.stateDim + 2] = this.velocityNoise; // vx
-        Q[3 * this.stateDim + 3] = this.velocityNoise; // vy
-        Q[4 * this.stateDim + 4] = this.processNoise * 0.1; // w
-        Q[5 * this.stateDim + 5] = this.processNoise * 0.1; // h
+        // Optimized noise values for better tracking stability
+        // 优化的噪声值以获得更好的追踪稳定性
+        Q[0 * this.stateDim + 0] = this.processNoise * 0.8; // x - reduced position noise
+        Q[1 * this.stateDim + 1] = this.processNoise * 0.8; // y - reduced position noise
+        Q[2 * this.stateDim + 2] = this.velocityNoise * 0.6; // vx - more stable velocity
+        Q[3 * this.stateDim + 3] = this.velocityNoise * 0.6; // vy - more stable velocity
+        Q[4 * this.stateDim + 4] = this.processNoise * 0.05; // w - very stable size
+        Q[5 * this.stateDim + 5] = this.processNoise * 0.05; // h - very stable size
         
         return Q;
     }
@@ -94,10 +97,12 @@ class KalmanFilter {
     createMeasurementNoiseMatrix() {
         const R = new Float32Array(this.measureDim * this.measureDim);
         
-        R[0 * this.measureDim + 0] = this.measurementNoise; // x
-        R[1 * this.measureDim + 1] = this.measurementNoise; // y
-        R[2 * this.measureDim + 2] = this.measurementNoise * 0.3; // w
-        R[3 * this.measureDim + 3] = this.measurementNoise * 0.3; // h
+        // Optimized measurement noise for better responsiveness
+        // 优化的测量噪声以获得更好的响应性
+        R[0 * this.measureDim + 0] = this.measurementNoise * 0.7; // x - trust position measurements more
+        R[1 * this.measureDim + 1] = this.measurementNoise * 0.7; // y - trust position measurements more
+        R[2 * this.measureDim + 2] = this.measurementNoise * 0.4; // w - moderate trust in size
+        R[3 * this.measureDim + 3] = this.measurementNoise * 0.4; // h - moderate trust in size
         
         return R;
     }
@@ -105,12 +110,14 @@ class KalmanFilter {
     createInitialCovarianceMatrix() {
         const P = new Float32Array(this.stateDim * this.stateDim);
         
-        P[0 * this.stateDim + 0] = 50; // x
-        P[1 * this.stateDim + 1] = 50; // y
-        P[2 * this.stateDim + 2] = 500; // vx
-        P[3 * this.stateDim + 3] = 500; // vy
-        P[4 * this.stateDim + 4] = 50; // w
-        P[5 * this.stateDim + 5] = 50; // h
+        // Optimized initial uncertainty for faster convergence
+        // 优化的初始不确定性以获得更快的收敛
+        P[0 * this.stateDim + 0] = 25; // x - lower initial uncertainty
+        P[1 * this.stateDim + 1] = 25; // y - lower initial uncertainty
+        P[2 * this.stateDim + 2] = 200; // vx - reduced velocity uncertainty
+        P[3 * this.stateDim + 3] = 200; // vy - reduced velocity uncertainty
+        P[4 * this.stateDim + 4] = 30; // w - moderate size uncertainty
+        P[5 * this.stateDim + 5] = 30; // h - moderate size uncertainty
         
         return P;
     }
@@ -134,9 +141,10 @@ class KalmanFilter {
         // Predict covariance: P = F * P * F^T + Q
         this.predictCovariance();
         
-        // Apply velocity damping
-        this.state[2] *= 0.98; // vx damping
-        this.state[3] *= 0.98; // vy damping
+        // Optimized velocity damping for smoother tracking
+        // 优化的速度阻尼以获得更平滑的追踪
+        this.state[2] *= 0.95; // vx damping - less aggressive
+        this.state[3] *= 0.95; // vy damping - less aggressive
         
         // Ensure positive dimensions
         this.state[4] = Math.max(1, this.state[4]);
@@ -170,24 +178,30 @@ class KalmanFilter {
         this.state[4] = Math.max(1, this.state[4]);
         this.state[5] = Math.max(1, this.state[5]);
         
-        // Update confidence
+        // Update confidence with improved tracking quality assessment
+        // 使用改进的追踪质量评估更新置信度
         const innovationMagnitude = Math.sqrt(innovation[0] * innovation[0] + innovation[1] * innovation[1]);
-        this.confidence = Math.max(0.1, Math.min(1.0, 
-            this.confidence * 0.95 + 0.05 * Math.exp(-innovationMagnitude / 30)
+        const confidenceDecay = innovationMagnitude > 20 ? 0.92 : 0.97; // Faster decay for large innovations
+        const confidenceGain = Math.exp(-innovationMagnitude / 25); // More sensitive to tracking quality
+        
+        this.confidence = Math.max(0.15, Math.min(1.0, 
+            this.confidence * confidenceDecay + (1 - confidenceDecay) * confidenceGain
         ));
     }
     
     calculateSimplifiedKalmanGain(innovation) {
-        // Simplified gain calculation for real-time performance
+        // Optimized gain calculation for better tracking responsiveness
+        // 优化的增益计算以获得更好的追踪响应性
         const K = new Float32Array(this.stateDim);
         
-        // Position gains (higher for position, lower for velocity)
-        K[0] = innovation[0] * 0.3; // x
-        K[1] = innovation[1] * 0.3; // y
-        K[2] = innovation[0] * 0.1; // vx
-        K[3] = innovation[1] * 0.1; // vy
-        K[4] = innovation[2] * 0.2; // w
-        K[5] = innovation[3] * 0.2; // h
+        // Enhanced position gains for more responsive tracking
+        // 增强的位置增益以获得更响应的追踪
+        K[0] = innovation[0] * 0.4; // x - increased responsiveness
+        K[1] = innovation[1] * 0.4; // y - increased responsiveness
+        K[2] = innovation[0] * 0.15; // vx - moderate velocity update
+        K[3] = innovation[1] * 0.15; // vy - moderate velocity update
+        K[4] = innovation[2] * 0.25; // w - improved size tracking
+        K[5] = innovation[3] * 0.25; // h - improved size tracking
         
         return K;
     }
