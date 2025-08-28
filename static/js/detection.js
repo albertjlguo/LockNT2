@@ -7,6 +7,18 @@ class ObjectDetectionManager {
         this.model = null;
         this.isModelLoaded = false;
         this.detectionCallbacks = [];
+        this.modelPath = './static/models/yolov8n.onnx'; // Path to the ONNX model
+        this.yoloClasses = [
+            'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
+            'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+            'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+            'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
+            'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+            'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+            'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+            'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
+            'hair drier', 'toothbrush'
+        ];
         this.detectionStats = {
             totalDetections: 0,
             objectCounts: {},
@@ -14,42 +26,33 @@ class ObjectDetectionManager {
         };
         
         // Enhanced confidence thresholds with dynamic adjustment
-        // 增强的置信度阈值，支持动态调整
         this.confidenceThresholds = {
             person: 0.45,   // Lowered for better person detection
             car: 0.55,      // Slightly higher for more accurate car detection
-            // Dynamic thresholds based on object size
-            // 基于目标大小的动态阈值
             getThreshold: (className, objectSize, imageArea) => {
                 const baseThreshold = this.confidenceThresholds[className] || 0.5;
                 const sizeRatio = objectSize / imageArea;
-                
-                // Adjust threshold based on object size
-                // 根据目标大小调整阈值
-                if (sizeRatio < 0.005) return Math.max(0.3, baseThreshold - 0.15); // Very small objects
-                if (sizeRatio < 0.02) return Math.max(0.35, baseThreshold - 0.1);  // Small objects
-                if (sizeRatio > 0.25) return Math.min(0.8, baseThreshold + 0.1);   // Large objects
+                if (sizeRatio < 0.005) return Math.max(0.3, baseThreshold - 0.15);
+                if (sizeRatio < 0.02) return Math.max(0.35, baseThreshold - 0.1);
+                if (sizeRatio > 0.25) return Math.min(0.8, baseThreshold + 0.1);
                 return baseThreshold;
             }
         };
         
         // Previous detections for temporal smoothing
-        // 用于时间平滑的先前检测
         this.previousDetections = [];
         
         // Multi-frame detection buffer for fusion
-        // 多帧检测缓冲区用于融合
         this.detectionBuffer = [];
         this.maxBufferSize = 3; // Keep last 3 frames for fusion
         
         // Occlusion and partial visibility handling
-        // 遮挡和部分可见性处理
         this.occlusionHandler = {
-            partialDetections: [], // Store partial/edge detections
-            boundaryThreshold: 0.15, // 15% of object can be outside screen
-            minVisibleRatio: 0.3, // Minimum 30% of object must be visible
-            edgeExpansionFactor: 1.5, // Expand search near edges
-            confidenceBoost: 0.1 // Boost confidence for edge detections
+            partialDetections: [],
+            boundaryThreshold: 0.15,
+            minVisibleRatio: 0.3,
+            edgeExpansionFactor: 1.5,
+            confidenceBoost: 0.1
         };
         
         this.initializeConfidenceControls();
@@ -60,8 +63,6 @@ class ObjectDetectionManager {
      * 初始化置信度控制滑块
      */
     initializeConfidenceControls() {
-        // Person confidence slider
-        // 人物置信度滑块
         const personSlider = document.getElementById('personConfidence');
         const personValue = document.getElementById('personConfidenceValue');
         
@@ -74,8 +75,6 @@ class ObjectDetectionManager {
             });
         }
         
-        // Car confidence slider
-        // 汽车置信度滑块
         const carSlider = document.getElementById('carConfidence');
         const carValue = document.getElementById('carConfidenceValue');
         
@@ -90,25 +89,40 @@ class ObjectDetectionManager {
     }
 
     /**
-     * Initialize and load the COCO-SSD model
+     * Initialize and load the ONNX YOLO model using ONNX Runtime Web
      */
     async loadModel() {
+        let provider;
         try {
-            this.updateModelStatus('loading', 'Loading AI Model...');
-            
-            // Load the COCO-SSD model
-            this.model = await cocoSsd.load();
-            this.isModelLoaded = true;
-            
-            this.updateModelStatus('ready', 'AI Model Ready');
-            console.log('COCO-SSD model loaded successfully');
-            
-            return true;
+            this.updateModelStatus('loading', 'Loading AI Model (WebGPU)...');
+            // First, try to create a session with the WebGPU provider.
+            this.model = await ort.InferenceSession.create(this.modelPath, {
+                executionProviders: ['webgpu'],
+                graphOptimizationLevel: 'all',
+            });
+            provider = 'webgpu';
+            console.log('ONNX model loaded successfully with WebGPU provider.');
         } catch (error) {
-            console.error('Error loading model:', error);
-            this.updateModelStatus('error', 'Failed to load AI Model');
-            return false;
+            console.warn('WebGPU is not available or failed to initialize. Falling back to WASM.', error);
+            try {
+                this.updateModelStatus('loading', 'Loading AI Model (WASM)...');
+                // If WebGPU fails, fall back to the WASM provider.
+                this.model = await ort.InferenceSession.create(this.modelPath, {
+                    executionProviders: ['wasm'],
+                    graphOptimizationLevel: 'all',
+                });
+                provider = 'wasm';
+                console.log('ONNX model loaded successfully with WASM provider.');
+            } catch (wasmError) {
+                console.error('Failed to load ONNX model with both WebGPU and WASM:', wasmError);
+                this.updateModelStatus('error', 'Failed to load AI Model');
+                return false;
+            }
         }
+
+        this.isModelLoaded = true;
+        this.updateModelStatus('ready', `AI Model Ready (${provider})`);
+        return true;
     }
 
     /**
@@ -151,8 +165,104 @@ class ObjectDetectionManager {
     }
 
     /**
-     * Enhanced object detection with improved coordinate handling and temporal smoothing
-     * 增强的目标检测，改进坐标处理和时间平滑
+     * Preprocess the video frame to create a tensor for the YOLO model.
+     * @param {HTMLVideoElement} videoElement The video element to process.
+     * @returns {ort.Tensor} The preprocessed tensor.
+     */
+    preprocess(videoElement) {
+        const modelWidth = 640;
+        const modelHeight = 640;
+
+        // Use an offscreen canvas for preprocessing
+        const canvas = document.createElement('canvas');
+        canvas.width = modelWidth;
+        canvas.height = modelHeight;
+        const ctx = canvas.getContext('2d');
+
+        // Draw the video frame onto the canvas, resizing it
+        ctx.drawImage(videoElement, 0, 0, modelWidth, modelHeight);
+        const imageData = ctx.getImageData(0, 0, modelWidth, modelHeight);
+        const { data } = imageData;
+
+        // Convert image data to a Float32Array in NCHW format
+        const red = [], green = [], blue = [];
+        for (let i = 0; i < data.length; i += 4) {
+            red.push(data[i] / 255.0);
+            green.push(data[i + 1] / 255.0);
+            blue.push(data[i + 2] / 255.0);
+        }
+        const transposedData = red.concat(green, blue);
+
+        // Create the ONNX tensor
+        const tensor = new ort.Tensor('float32', new Float32Array(transposedData), [1, 3, modelHeight, modelWidth]);
+        return tensor;
+    }
+
+    /**
+     * Postprocess the model's output tensor to get detections.
+     * @param {ort.Tensor} outputTensor The output tensor from the model.
+     * @param {number} imageWidth The original width of the video frame.
+     * @param {number} imageHeight The original height of the video frame.
+     * @returns {Array<object>} A list of detection objects.
+     */
+    postprocess(outputTensor, imageWidth, imageHeight) {
+        const modelWidth = 640;
+        const modelHeight = 640;
+        const data = outputTensor.data;
+        const predictions = [];
+
+        // The output shape is [1, 84, 8400], where 84 = 4 (box) + 80 (classes)
+        // We need to transpose it to [1, 8400, 84]
+        const transposedData = [];
+        for (let i = 0; i < 8400; i++) {
+            for (let j = 0; j < 84; j++) {
+                transposedData.push(data[j * 8400 + i]);
+            }
+        }
+
+        for (let i = 0; i < 8400; i++) {
+            const offset = i * 84;
+            const box = transposedData.slice(offset, offset + 4);
+            const classScores = transposedData.slice(offset + 4, offset + 84);
+
+            let maxScore = 0;
+            let maxIndex = -1;
+            for (let j = 0; j < classScores.length; j++) {
+                if (classScores[j] > maxScore) {
+                    maxScore = classScores[j];
+                    maxIndex = j;
+                }
+            }
+
+            if (maxIndex !== -1) {
+                const className = this.yoloClasses[maxIndex];
+                const minConfidence = this.confidenceThresholds[className] || 0.5;
+
+                if (maxScore > minConfidence) {
+                const [cx, cy, w, h] = box;
+
+                // Scale box coordinates from model space (640x640) to image space
+                const scaleX = imageWidth / modelWidth;
+                const scaleY = imageHeight / modelHeight;
+
+                const x1 = (cx - w / 2) * scaleX;
+                const y1 = (cy - h / 2) * scaleY;
+                const width = w * scaleX;
+                const height = h * scaleY;
+
+                predictions.push({
+                    bbox: [x1, y1, width, height],
+                    class: className,
+                    score: maxScore,
+                });
+                }
+            }
+        }
+        return predictions;
+    }
+
+    /**
+     * Object detection using the ONNX YOLO model.
      */
     async detectObjects(videoElement) {
         if (!this.isModelLoaded || !this.model) {
@@ -161,38 +271,31 @@ class ObjectDetectionManager {
         }
 
         try {
-            // Get raw predictions from COCO-SSD model
-            // 从 COCO-SSD 模型获取原始预测结果
-            const rawPredictions = await this.model.detect(videoElement);
-            
-            // Apply bounding box refinement and filtering
-            // 应用边界框优化和过滤
-            const refinedPredictions = this.refineBoundingBoxes(rawPredictions, videoElement);
-            
-            // Apply Non-Maximum Suppression to remove overlapping detections
-            // 应用非极大值抑制移除重叠检测
-            const nmsFiltered = this.applyNonMaxSuppression(refinedPredictions);
-            
-            // Apply multi-frame detection fusion for better accuracy
-            // 应用多帧检测融合以提高准确性
+            // 1. Preprocess the frame
+            const tensor = this.preprocess(videoElement);
+
+            // 2. Run inference
+            const feeds = { [this.model.inputNames[0]]: tensor };
+            const results = await this.model.run(feeds);
+            const outputTensor = results[this.model.outputNames[0]];
+
+            // 3. Postprocess the results
+            const rawPredictions = this.postprocess(outputTensor, videoElement.naturalWidth, videoElement.naturalHeight);
+
+            // 4. Apply Non-Maximum Suppression
+            const nmsFiltered = this.applyNonMaxSuppression(rawPredictions);
+
+            // 5. Apply other refinements (smoothing, fusion, etc.)
             const fusedDetections = this.applyMultiFrameFusion(nmsFiltered);
-            
-            // Handle partial visibility and occlusion cases
-            // 处理部分可见性和遮挡情况
             const occlusionEnhanced = this.handlePartialVisibility(fusedDetections, videoElement);
-            
-            // Apply temporal smoothing to reduce jitter
-            // 应用时间平滑以减少抖动
             const smoothedPredictions = this.applyTemporalSmoothing(occlusionEnhanced, this.previousDetections);
-            
-            // Store for next frame smoothing
-            // 存储用于下一帧平滑
+
             this.previousDetections = smoothedPredictions;
-            
             this.processDetections(smoothedPredictions);
+
             return smoothedPredictions;
         } catch (error) {
-            console.error('Error during object detection:', error);
+            console.error('Error during ONNX object detection:', error);
             return [];
         }
     }
