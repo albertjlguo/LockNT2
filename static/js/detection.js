@@ -156,8 +156,8 @@ class ObjectDetectionManager {
     }
     
     /**
-     * Refine bounding boxes with improved accuracy and coordinate validation
-     * 优化边界框，提高准确性和坐标验证
+     * Refine bounding boxes with improved accuracy, coordinate validation, and perspective scaling
+     * 优化边界框，提高准确性、坐标验证和透视缩放
      */
     refineBoundingBoxes(predictions, videoElement) {
         if (!predictions || predictions.length === 0) return [];
@@ -166,6 +166,10 @@ class ObjectDetectionManager {
         // 获取图像尺寸用于坐标验证
         const imageWidth = videoElement.naturalWidth || videoElement.width || 640;
         const imageHeight = videoElement.naturalHeight || videoElement.height || 480;
+        
+        // Initialize perspective scaling parameters
+        // 初始化透视缩放参数
+        const perspectiveParams = this.initializePerspectiveParams(imageWidth, imageHeight);
         
         return predictions.map(pred => {
             // Filter to only detect persons and cars
@@ -246,9 +250,13 @@ class ObjectDetectionManager {
                 console.log(`Partially visible target detected: ${(visibleRatio * 100).toFixed(1)}% visible`);
             }
             
+            // Apply perspective-aware bounding box scaling
+            // 应用透视感知的边界框缩放
+            const perspectiveScaledBbox = this.applyPerspectiveScaling(pred.bbox, pred.class, perspectiveParams);
+            
             // Apply conservative bounding box optimization
             // 应用保守的边界框优化
-            const refinedBbox = this.optimizeBoundingBox(pred.bbox, pred.class, pred.score);
+            const refinedBbox = this.optimizeBoundingBox(perspectiveScaledBbox, pred.class, pred.score);
             
             // Final coordinate validation after optimization
             // 优化后的最终坐标验证
@@ -268,7 +276,11 @@ class ObjectDetectionManager {
                 originalImageSize: { width: imageWidth, height: imageHeight },
                 // Add stability score for tracking
                 // 添加用于追踪的稳定性分数
-                stability: this.calculateStabilityScore(pred.score, pred.class)
+                stability: this.calculateStabilityScore(pred.score, pred.class),
+                // Add estimated depth and scale factor
+                // 添加估计深度和缩放因子
+                estimatedDepth: this.estimateObjectDepth(finalBbox, pred.class, imageWidth, imageHeight),
+                scaleFactor: this.calculateScaleFactor(finalBbox, pred.class, imageWidth, imageHeight)
             };
         }).filter(pred => pred !== null);
     }
@@ -343,6 +355,160 @@ class ObjectDetectionManager {
             paddedWidth,
             paddedHeight
         ];
+    }
+    
+    /**
+     * Initialize perspective scaling parameters based on image dimensions
+     * 基于图像尺寸初始化透视缩放参数
+     */
+    initializePerspectiveParams(imageWidth, imageHeight) {
+        return {
+            // Horizon line (typically at 1/3 from top for typical camera angles)
+            // 地平线（通常在距离顶部1/3处，适用于典型相机角度）
+            horizonY: imageHeight * 0.35,
+            
+            // Vanishing point (center horizontally, at horizon)
+            // 消失点（水平居中，在地平线上）
+            vanishingPoint: {
+                x: imageWidth * 0.5,
+                y: imageHeight * 0.35
+            },
+            
+            // Reference object sizes (in pixels) at different distances
+            // 不同距离处的参考物体尺寸（像素）
+            referenceSize: {
+                person: {
+                    near: { width: 120, height: 300 },    // Close person (~3m)
+                    far: { width: 30, height: 80 }        // Distant person (~20m)
+                },
+                car: {
+                    near: { width: 200, height: 150 },    // Close car (~5m)
+                    far: { width: 60, height: 45 }        // Distant car (~30m)
+                }
+            },
+            
+            // Perspective scaling factors
+            // 透视缩放因子
+            perspectiveStrength: 0.7,  // How strong the perspective effect is
+            minScale: 0.3,             // Minimum scale factor
+            maxScale: 2.0              // Maximum scale factor
+        };
+    }
+    
+    /**
+     * Apply perspective-aware scaling to bounding boxes
+     * 对边界框应用透视感知缩放
+     */
+    applyPerspectiveScaling(bbox, objectClass, perspectiveParams) {
+        const [x, y, width, height] = bbox;
+        const centerY = y + height / 2;
+        
+        // Calculate distance from horizon (normalized)
+        // 计算距离地平线的距离（归一化）
+        const distanceFromHorizon = Math.abs(centerY - perspectiveParams.horizonY);
+        const maxDistance = Math.max(perspectiveParams.horizonY, 
+                                   perspectiveParams.vanishingPoint.y - perspectiveParams.horizonY);
+        const normalizedDistance = Math.min(1.0, distanceFromHorizon / maxDistance);
+        
+        // Estimate relative depth based on position
+        // 基于位置估计相对深度
+        let depthFactor;
+        if (centerY < perspectiveParams.horizonY) {
+            // Above horizon - farther objects
+            // 地平线上方 - 较远物体
+            depthFactor = 0.2 + (1.0 - normalizedDistance) * 0.8;
+        } else {
+            // Below horizon - closer objects
+            // 地平线下方 - 较近物体
+            depthFactor = 0.4 + normalizedDistance * 0.6;
+        }
+        
+        // Get reference sizes for the object class
+        // 获取物体类别的参考尺寸
+        const refSize = perspectiveParams.referenceSize[objectClass];
+        if (!refSize) {
+            return bbox; // No scaling for unknown classes
+        }
+        
+        // Calculate expected size based on depth
+        // 基于深度计算期望尺寸
+        const expectedWidth = refSize.far.width + (refSize.near.width - refSize.far.width) * depthFactor;
+        const expectedHeight = refSize.far.height + (refSize.near.height - refSize.far.height) * depthFactor;
+        
+        // Calculate scale factors
+        // 计算缩放因子
+        const scaleX = Math.max(perspectiveParams.minScale, 
+                               Math.min(perspectiveParams.maxScale, expectedWidth / width));
+        const scaleY = Math.max(perspectiveParams.minScale, 
+                               Math.min(perspectiveParams.maxScale, expectedHeight / height));
+        
+        // Apply perspective strength (blend between original and scaled)
+        // 应用透视强度（在原始和缩放之间混合）
+        const finalScaleX = 1.0 + (scaleX - 1.0) * perspectiveParams.perspectiveStrength;
+        const finalScaleY = 1.0 + (scaleY - 1.0) * perspectiveParams.perspectiveStrength;
+        
+        // Calculate new dimensions
+        // 计算新尺寸
+        const newWidth = width * finalScaleX;
+        const newHeight = height * finalScaleY;
+        
+        // Keep center position, adjust top-left corner
+        // 保持中心位置，调整左上角
+        const centerX = x + width / 2;
+        const newX = centerX - newWidth / 2;
+        const newY = centerY - newHeight / 2;
+        
+        return [newX, newY, newWidth, newHeight];
+    }
+    
+    /**
+     * Estimate object depth based on size and position
+     * 基于尺寸和位置估计物体深度
+     */
+    estimateObjectDepth(bbox, objectClass, imageWidth, imageHeight) {
+        const [x, y, width, height] = bbox;
+        const centerY = y + height / 2;
+        
+        // Normalize position (0 = top, 1 = bottom)
+        // 归一化位置（0 = 顶部，1 = 底部）
+        const normalizedY = centerY / imageHeight;
+        
+        // Estimate depth based on vertical position and size
+        // 基于垂直位置和尺寸估计深度
+        const positionDepth = normalizedY; // Objects lower in frame are typically closer
+        
+        // Size-based depth estimation
+        // 基于尺寸的深度估计
+        const objectArea = width * height;
+        const imageArea = imageWidth * imageHeight;
+        const sizeRatio = objectArea / imageArea;
+        
+        // Larger objects are typically closer
+        // 较大物体通常较近
+        const sizeDepth = 1.0 - Math.min(1.0, sizeRatio * 10);
+        
+        // Combine position and size cues
+        // 结合位置和尺寸线索
+        const estimatedDepth = (positionDepth * 0.6 + sizeDepth * 0.4);
+        
+        return Math.max(0.1, Math.min(1.0, estimatedDepth));
+    }
+    
+    /**
+     * Calculate scale factor for perspective correction
+     * 计算透视校正的缩放因子
+     */
+    calculateScaleFactor(bbox, objectClass, imageWidth, imageHeight) {
+        const [x, y, width, height] = bbox;
+        const depth = this.estimateObjectDepth(bbox, objectClass, imageWidth, imageHeight);
+        
+        // Scale factor inversely related to depth
+        // 缩放因子与深度成反比
+        const baseFactor = 1.0 / (0.3 + depth * 0.7);
+        
+        // Clamp to reasonable range
+        // 限制在合理范围内
+        return Math.max(0.5, Math.min(2.0, baseFactor));
     }
     
     /**

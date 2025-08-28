@@ -615,7 +615,8 @@ class StreamManager {
     }
 
     /**
-     * Draw detection bounding boxes and labels
+     * Draw detection bounding boxes and labels with perspective information
+     * 绘制带透视信息的检测边界框和标签
      */
     drawDetections(predictions) {
         if (!this.detectionContext || !predictions) return;
@@ -631,28 +632,71 @@ class StreamManager {
             
             const [scaledX, scaledY, scaledWidth, scaledHeight] = [x, y, width, height];
 
-            // Draw bounding box
-            this.detectionContext.strokeStyle = '#471580';
+            // Determine box color based on estimated depth
+            // 根据估计深度确定边界框颜色
+            let boxColor = '#471580'; // Default purple
+            if (prediction.estimatedDepth !== undefined) {
+                const depth = prediction.estimatedDepth;
+                if (depth < 0.3) {
+                    boxColor = '#ff4444'; // Red for close objects
+                } else if (depth < 0.7) {
+                    boxColor = '#ff8800'; // Orange for medium distance
+                } else {
+                    boxColor = '#4444ff'; // Blue for far objects
+                }
+            }
+
+            // Draw bounding box with depth-based color
+            this.detectionContext.strokeStyle = boxColor;
             this.detectionContext.lineWidth = 3;
             this.detectionContext.strokeRect(scaledX, scaledY, scaledWidth, scaledHeight);
 
-            // Draw label background
-            const label = `${prediction.class} (${confidence}%)`;
-            this.detectionContext.font = '14px Arial';
+            // Enhanced label with depth and scale information
+            // 增强标签，包含深度和缩放信息
+            let label = `${prediction.class} (${confidence}%)`;
+            if (prediction.estimatedDepth !== undefined && prediction.scaleFactor !== undefined) {
+                const depthPercent = (prediction.estimatedDepth * 100).toFixed(0);
+                const scalePercent = (prediction.scaleFactor * 100).toFixed(0);
+                label += ` D:${depthPercent}% S:${scalePercent}%`;
+            }
+            
+            this.detectionContext.font = '12px Arial';
             const textWidth = this.detectionContext.measureText(label).width;
             
-            this.detectionContext.fillStyle = '#471580';
-            this.detectionContext.fillRect(scaledX, scaledY - 25, textWidth + 10, 25);
+            // Draw label background with same color as box
+            this.detectionContext.fillStyle = boxColor;
+            this.detectionContext.fillRect(scaledX, scaledY - 28, textWidth + 10, 28);
 
             // Draw label text
             this.detectionContext.fillStyle = 'white';
-            this.detectionContext.fillText(label, scaledX + 5, scaledY - 8);
+            this.detectionContext.fillText(label, scaledX + 5, scaledY - 10);
+            
+            // Draw depth indicator line
+            // 绘制深度指示线
+            if (prediction.estimatedDepth !== undefined) {
+                const centerX = scaledX + scaledWidth / 2;
+                const centerY = scaledY + scaledHeight / 2;
+                const lineLength = 20 + (1 - prediction.estimatedDepth) * 30; // Longer line for closer objects
+                
+                this.detectionContext.strokeStyle = boxColor;
+                this.detectionContext.lineWidth = 2;
+                this.detectionContext.beginPath();
+                this.detectionContext.moveTo(centerX, centerY - lineLength / 2);
+                this.detectionContext.lineTo(centerX, centerY + lineLength / 2);
+                this.detectionContext.stroke();
+                
+                // Draw horizontal indicator
+                this.detectionContext.beginPath();
+                this.detectionContext.moveTo(centerX - 5, centerY);
+                this.detectionContext.lineTo(centerX + 5, centerY);
+                this.detectionContext.stroke();
+            }
         });
     }
 
     /**
-     * Draw tracks (IDs, boxes, and trajectories)
-     * 绘制追踪框与轨迹（显示类别+ID）
+     * Draw tracks (IDs, boxes, and trajectories) with enhanced depth visualization
+     * 绘制追踪框与轨迹（显示类别+ID），增强深度可视化
      */
     drawTracks() {
         if (!this.detectionContext || !this.tracker) return;
@@ -664,23 +708,78 @@ class StreamManager {
         for (const t of tracks) {
             const b = t.bbox;
             ctx.save();
-            ctx.strokeStyle = t.color;
-            ctx.lineWidth = t.locked ? 3 : 2;
-            ctx.setLineDash(t.locked ? [6, 4] : []);
+            
+            // Enhanced track visualization with depth-aware styling
+            // 增强追踪可视化，包含深度感知样式
+            let trackColor = t.color;
+            let lineWidth = t.locked ? 3 : 2;
+            
+            // Add depth-based visual effects if available
+            // 如果可用，添加基于深度的视觉效果
+            if (t.estimatedDepth !== undefined) {
+                const depth = t.estimatedDepth;
+                lineWidth = t.locked ? (3 + (1 - depth) * 2) : 2; // Thicker lines for closer objects
+                
+                // Add glow effect for close objects
+                if (depth < 0.4) {
+                    ctx.shadowColor = trackColor;
+                    ctx.shadowBlur = 8;
+                }
+            }
+            
+            ctx.strokeStyle = trackColor;
+            ctx.lineWidth = lineWidth;
+            ctx.setLineDash(t.locked ? [8, 4] : []);
             ctx.strokeRect(b.x, b.y, b.w, b.h);
 
-            // Draw class + ID label (no "Lock" text)
-            // 绘制类别+ID标签（不显示"Lock"文字）
+            // Draw class + ID label with depth information
+            // 绘制类别+ID标签，包含深度信息
             const className = this.formatClassName(t.class || 'object');
-            const label = `${className} ID ${t.id}`;
-            ctx.font = '14px Arial';
+            let label = `${className} ID ${t.id}`;
+            
+            // Add depth and scale info if available
+            if (t.estimatedDepth !== undefined && t.scaleFactor !== undefined) {
+                const depthPercent = (t.estimatedDepth * 100).toFixed(0);
+                label += ` (D:${depthPercent}%)`;
+            }
+            
+            ctx.font = '13px Arial';
             const tw = ctx.measureText(label).width;
-            ctx.fillStyle = t.color;
+            ctx.fillStyle = trackColor;
             ctx.globalAlpha = 0.9;
-            ctx.fillRect(b.x, Math.max(0, b.y - 22), tw + 10, 20);
+            ctx.fillRect(b.x, Math.max(0, b.y - 24), tw + 12, 22);
             ctx.fillStyle = '#fff';
             ctx.globalAlpha = 1.0;
-            ctx.fillText(label, b.x + 5, Math.max(14, b.y - 6));
+            ctx.fillText(label, b.x + 6, Math.max(15, b.y - 7));
+            
+            // Draw trajectory with depth-aware opacity
+            // 绘制轨迹，透明度感知深度
+            if (t.trajectory && t.trajectory.length > 1) {
+                ctx.strokeStyle = trackColor;
+                ctx.lineWidth = 2;
+                ctx.setLineDash([]);
+                ctx.globalAlpha = 0.6;
+                
+                ctx.beginPath();
+                const firstPoint = t.trajectory[0];
+                ctx.moveTo(firstPoint.x, firstPoint.y);
+                
+                for (let i = 1; i < t.trajectory.length; i++) {
+                    const point = t.trajectory[i];
+                    ctx.lineTo(point.x, point.y);
+                }
+                ctx.stroke();
+                
+                // Draw trajectory points
+                t.trajectory.forEach((point, index) => {
+                    const alpha = (index + 1) / t.trajectory.length * 0.8;
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = trackColor;
+                    ctx.beginPath();
+                    ctx.arc(point.x, point.y, 2, 0, 2 * Math.PI);
+                    ctx.fill();
+                });
+            }
 
             ctx.restore();
         }
