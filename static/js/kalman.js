@@ -15,11 +15,11 @@ class KalmanFilter {
         this.stateDim = 6;
         this.measureDim = 4;
         
-        // Optimized configuration parameters for better tracking
-        // 优化的配置参数以获得更好的追踪效果
-        this.processNoise = options.processNoise || 1.5;      // Reduced for smoother prediction
-        this.measurementNoise = options.measurementNoise || 5.0; // Reduced to trust measurements more
-        this.velocityNoise = options.velocityNoise || 8.0;    // Reduced for more stable velocity estimates
+        // Enhanced configuration parameters for improved detection accuracy
+        // 针对改进检测精度的增强配置参数
+        this.processNoise = options.processNoise || 1.2;      // Further reduced for smoother prediction
+        this.measurementNoise = options.measurementNoise || 3.5; // Lower to trust enhanced detections more
+        this.velocityNoise = options.velocityNoise || 6.0;    // Reduced for more stable velocity estimates
         
         // Initialize state vector [x, y, vx, vy, w, h]
         this.state = new Float32Array([
@@ -194,14 +194,14 @@ class KalmanFilter {
         // 优化的增益计算以获得更好的追踪响应性
         const K = new Float32Array(this.stateDim);
         
-        // Enhanced position gains for more responsive tracking
-        // 增强的位置增益以获得更响应的追踪
-        K[0] = innovation[0] * 0.4; // x - increased responsiveness
-        K[1] = innovation[1] * 0.4; // y - increased responsiveness
-        K[2] = innovation[0] * 0.15; // vx - moderate velocity update
-        K[3] = innovation[1] * 0.15; // vy - moderate velocity update
-        K[4] = innovation[2] * 0.25; // w - improved size tracking
-        K[5] = innovation[3] * 0.25; // h - improved size tracking
+        // Enhanced position gains optimized for improved detection accuracy
+        // 针对改进检测精度优化的增强位置增益
+        K[0] = innovation[0] * 0.45; // x - higher responsiveness for accurate detections
+        K[1] = innovation[1] * 0.45; // y - higher responsiveness for accurate detections
+        K[2] = innovation[0] * 0.18; // vx - improved velocity update
+        K[3] = innovation[1] * 0.18; // vy - improved velocity update
+        K[4] = innovation[2] * 0.30; // w - better size tracking with fusion
+        K[5] = innovation[3] * 0.30; // h - better size tracking with fusion
         
         return K;
     }

@@ -24,6 +24,11 @@ class ObjectDetectionManager {
         // 用于时间平滑的先前检测
         this.previousDetections = [];
         
+        // Multi-frame detection buffer for fusion
+        // 多帧检测缓冲区用于融合
+        this.detectionBuffer = [];
+        this.maxBufferSize = 3; // Keep last 3 frames for fusion
+        
         this.initializeConfidenceControls();
     }
 
@@ -141,9 +146,17 @@ class ObjectDetectionManager {
             // 应用边界框优化和过滤
             const refinedPredictions = this.refineBoundingBoxes(rawPredictions, videoElement);
             
+            // Apply Non-Maximum Suppression to remove overlapping detections
+            // 应用非极大值抑制移除重叠检测
+            const nmsFiltered = this.applyNonMaxSuppression(refinedPredictions);
+            
+            // Apply multi-frame detection fusion for better accuracy
+            // 应用多帧检测融合以提高准确性
+            const fusedDetections = this.applyMultiFrameFusion(nmsFiltered);
+            
             // Apply temporal smoothing to reduce jitter
             // 应用时间平滑以减少抖动
-            const smoothedPredictions = this.applyTemporalSmoothing(refinedPredictions, this.previousDetections);
+            const smoothedPredictions = this.applyTemporalSmoothing(fusedDetections, this.previousDetections);
             
             // Store for next frame smoothing
             // 存储用于下一帧平滑
@@ -177,30 +190,86 @@ class ObjectDetectionManager {
                 return null;
             }
             
-            // Apply class-specific confidence filtering with dynamic thresholds
-            // 应用针对类别的动态置信度过滤
+            // Apply adaptive confidence filtering based on object size and context
+            // 应用基于目标大小和上下文的自适应置信度过滤
             const baseConfidence = this.confidenceThresholds[pred.class] || 0.3;
-            // Lower threshold for small objects to improve detection
             const objectSize = pred.bbox[2] * pred.bbox[3];
-            const sizeAdjustment = objectSize < 5000 ? -0.05 : 0; // Lower threshold for small objects
-            const minConfidence = Math.max(0.2, baseConfidence + sizeAdjustment);
+            const imageArea = imageWidth * imageHeight;
+            const sizeRatio = objectSize / imageArea;
+            
+            // Adaptive threshold based on object size relative to image
+            // 基于目标相对于图像大小的自适应阈值
+            let sizeAdjustment = 0;
+            if (sizeRatio < 0.01) { // Very small objects
+                sizeAdjustment = -0.1;
+            } else if (sizeRatio < 0.05) { // Small objects
+                sizeAdjustment = -0.05;
+            } else if (sizeRatio > 0.3) { // Large objects
+                sizeAdjustment = 0.05;
+            }
+            
+            const minConfidence = Math.max(0.15, baseConfidence + sizeAdjustment);
             
             if (pred.score < minConfidence) return null;
             
-            // Validate original bbox coordinates
-            // 验证原始边界框坐标
+            // Enhanced coordinate validation and intelligent clamping
+            // 增强的坐标验证和智能钳制
             const [x, y, w, h] = pred.bbox;
+            
+            // Check for invalid coordinates
+            // 检查无效坐标
+            let needsClamping = false;
             if (x < 0 || y < 0 || w <= 0 || h <= 0 || 
                 x + w > imageWidth || y + h > imageHeight) {
-                console.warn('Invalid bbox coordinates:', pred.bbox, 'Image size:', imageWidth, 'x', imageHeight);
-                // Clamp to valid range
-                const clampedBbox = [
-                    Math.max(0, Math.min(x, imageWidth - 1)),
-                    Math.max(0, Math.min(y, imageHeight - 1)),
-                    Math.max(1, Math.min(w, imageWidth - Math.max(0, x))),
-                    Math.max(1, Math.min(h, imageHeight - Math.max(0, y)))
-                ];
-                pred.bbox = clampedBbox;
+                needsClamping = true;
+            }
+            
+            if (needsClamping) {
+                // Intelligent clamping that preserves aspect ratio when possible
+                // 智能钳制，尽可能保持宽高比
+                const originalAspectRatio = w / h;
+                
+                // Calculate maximum possible dimensions within image bounds
+                // 计算图像边界内的最大可能尺寸
+                const maxX = Math.max(0, Math.min(x, imageWidth - 1));
+                const maxY = Math.max(0, Math.min(y, imageHeight - 1));
+                const maxW = imageWidth - maxX;
+                const maxH = imageHeight - maxY;
+                
+                let clampedW = Math.max(1, Math.min(w, maxW));
+                let clampedH = Math.max(1, Math.min(h, maxH));
+                
+                // Try to preserve aspect ratio
+                // 尝试保持宽高比
+                if (clampedW / clampedH > originalAspectRatio * 1.2) {
+                    // Width is too large relative to height
+                    // 宽度相对于高度过大
+                    clampedW = clampedH * originalAspectRatio;
+                } else if (clampedH / clampedW > (1/originalAspectRatio) * 1.2) {
+                    // Height is too large relative to width
+                    // 高度相对于宽度过大
+                    clampedH = clampedW / originalAspectRatio;
+                }
+                
+                // Final bounds check
+                // 最终边界检查
+                clampedW = Math.max(1, Math.min(clampedW, maxW));
+                clampedH = Math.max(1, Math.min(clampedH, maxH));
+                
+                pred.bbox = [maxX, maxY, clampedW, clampedH];
+                
+                // Add quality penalty for heavily clamped detections
+                // 为严重钳制的检测添加质量惩罚
+                const clampingPenalty = Math.max(
+                    Math.abs(x - maxX) / w,
+                    Math.abs(y - maxY) / h,
+                    Math.abs(w - clampedW) / w,
+                    Math.abs(h - clampedH) / h
+                );
+                
+                if (clampingPenalty > 0.3) {
+                    pred.score *= (1 - clampingPenalty * 0.3); // Reduce confidence for heavily modified boxes
+                }
             }
             
             // Apply minimal bounding box optimization to preserve accuracy
@@ -244,40 +313,64 @@ class ObjectDetectionManager {
             return bbox; // Return original if invalid
         }
         
-        // Minimal adjustments to preserve detection accuracy
-        // 最小调整以保持检测准确性
+        // Enhanced optimization based on confidence and object characteristics
+        // 基于置信度和目标特征的增强优化
         let adjustmentFactor = 1.0;
-        let paddingRatio = 0.0; // No padding to maintain exact coordinates
+        let paddingRatio = 0.0;
         
-        switch (objectClass) {
-            case 'person':
-                // No adjustment for persons to maintain exact detection
-                // 对人物不进行调整以维持精确检测
-                adjustmentFactor = 1.0;
-                paddingRatio = 0.0;
-                break;
-            case 'car':
-                // No adjustment for cars to maintain exact detection
-                // 对汽车不进行调整以维持精确检测
-                adjustmentFactor = 1.0;
-                paddingRatio = 0.0;
-                break;
-            default:
-                // No adjustment for any classes
-                // 对任何类别都不进行调整
-                adjustmentFactor = 1.0;
-                paddingRatio = 0.0;
+        // Confidence-based adjustments
+        // 基于置信度的调整
+        if (confidence < 0.6) {
+            // Lower confidence detections get slight tightening
+            // 低置信度检测稍微收紧
+            adjustmentFactor = 0.95;
+        } else if (confidence > 0.8) {
+            // High confidence detections get slight expansion for completeness
+            // 高置信度检测稍微扩展以确保完整性
+            adjustmentFactor = 1.02;
+            paddingRatio = 0.01;
         }
         
-        // Apply conservative adjustments
-        // 应用保守的调整
+        // Class-specific optimizations
+        // 类别特定优化
+        switch (objectClass) {
+            case 'person':
+                // Persons often need slight vertical expansion for full body
+                // 人物通常需要轻微的垂直扩展以包含全身
+                if (height / width > 1.5) { // Likely full body
+                    adjustmentFactor *= 1.01;
+                    paddingRatio += 0.005;
+                }
+                break;
+            case 'car':
+                // Cars benefit from slight horizontal expansion
+                // 汽车受益于轻微的水平扩展
+                if (width / height > 1.8) { // Likely side view
+                    adjustmentFactor *= 1.01;
+                    paddingRatio += 0.005;
+                }
+                break;
+        }
+        
+        // Apply size-based adjustments
+        // 应用基于大小的调整
+        const objectArea = width * height;
+        if (objectArea < 2000) { // Small objects
+            adjustmentFactor *= 1.05; // Slight expansion for small objects
+            paddingRatio += 0.02;
+        } else if (objectArea > 50000) { // Large objects
+            adjustmentFactor *= 0.98; // Slight tightening for large objects
+        }
+        
+        // Calculate optimized dimensions
+        // 计算优化后的尺寸
         const centerX = x + width / 2;
         const centerY = y + height / 2;
         const newWidth = width * adjustmentFactor;
         const newHeight = height * adjustmentFactor;
         
-        // Add minimal padding for stability without affecting accuracy
-        // 添加最小填充以提高稳定性而不影响准确性
+        // Add padding for stability
+        // 添加填充以提高稳定性
         const paddedWidth = newWidth * (1 + paddingRatio);
         const paddedHeight = newHeight * (1 + paddingRatio);
         
@@ -608,6 +701,213 @@ class ObjectDetectionManager {
         const union_area = bbox1_area + bbox2_area - intersect_area;
         
         return intersect_area / union_area;
+    }
+    
+    /**
+     * Apply Non-Maximum Suppression to remove overlapping detections
+     * 应用非极大值抑制移除重叠检测
+     */
+    applyNonMaxSuppression(detections, iouThreshold = 0.5) {
+        if (!detections || detections.length === 0) return [];
+        
+        // Group detections by class
+        // 按类别分组检测
+        const detectionsByClass = {};
+        detections.forEach(det => {
+            if (!detectionsByClass[det.class]) {
+                detectionsByClass[det.class] = [];
+            }
+            detectionsByClass[det.class].push(det);
+        });
+        
+        const finalDetections = [];
+        
+        // Apply NMS for each class separately
+        // 对每个类别分别应用NMS
+        Object.keys(detectionsByClass).forEach(className => {
+            const classDetections = detectionsByClass[className];
+            
+            // Sort by confidence score (descending)
+            // 按置信度分数排序（降序）
+            classDetections.sort((a, b) => b.score - a.score);
+            
+            const keep = [];
+            const suppressed = new Set();
+            
+            for (let i = 0; i < classDetections.length; i++) {
+                if (suppressed.has(i)) continue;
+                
+                const currentDet = classDetections[i];
+                keep.push(currentDet);
+                
+                // Suppress overlapping detections
+                // 抑制重叠检测
+                for (let j = i + 1; j < classDetections.length; j++) {
+                    if (suppressed.has(j)) continue;
+                    
+                    const otherDet = classDetections[j];
+                    const iou = this.calculateIoU(currentDet.bbox, otherDet.bbox);
+                    
+                    if (iou > iouThreshold) {
+                        suppressed.add(j);
+                    }
+                }
+            }
+            
+            finalDetections.push(...keep);
+        });
+        
+        return finalDetections;
+    }
+    
+    /**
+     * Apply multi-frame detection fusion for better accuracy
+     * 应用多帧检测融合以提高准确性
+     */
+    applyMultiFrameFusion(currentDetections) {
+        // Add current detections to buffer
+        // 将当前检测添加到缓冲区
+        this.detectionBuffer.push({
+            detections: currentDetections,
+            timestamp: Date.now()
+        });
+        
+        // Keep only recent frames
+        // 只保留最近的帧
+        if (this.detectionBuffer.length > this.maxBufferSize) {
+            this.detectionBuffer.shift();
+        }
+        
+        // If we don't have enough frames yet, return current detections
+        // 如果还没有足够的帧，返回当前检测
+        if (this.detectionBuffer.length < 2) {
+            return currentDetections;
+        }
+        
+        const fusedDetections = [];
+        
+        // For each current detection, try to find matches in previous frames
+        // 对于每个当前检测，尝试在先前帧中找到匹配
+        currentDetections.forEach(currentDet => {
+            const matches = [];
+            matches.push(currentDet);
+            
+            // Look for matches in previous frames
+            // 在先前帧中寻找匹配
+            for (let i = this.detectionBuffer.length - 2; i >= 0; i--) {
+                const frameData = this.detectionBuffer[i];
+                const bestMatch = this.findBestMatch(currentDet, frameData.detections);
+                
+                if (bestMatch) {
+                    matches.push(bestMatch);
+                }
+            }
+            
+            // Fuse the matches to create a more accurate detection
+            // 融合匹配以创建更准确的检测
+            if (matches.length >= 2) {
+                const fusedDetection = this.fuseDetections(matches);
+                fusedDetections.push(fusedDetection);
+            } else {
+                // No matches found, use current detection
+                // 未找到匹配，使用当前检测
+                fusedDetections.push(currentDet);
+            }
+        });
+        
+        return fusedDetections;
+    }
+    
+    /**
+     * Find best matching detection in a frame
+     * 在帧中找到最佳匹配检测
+     */
+    findBestMatch(targetDet, frameDetections) {
+        let bestMatch = null;
+        let bestScore = 0;
+        
+        frameDetections.forEach(det => {
+            if (det.class !== targetDet.class) return;
+            
+            const iou = this.calculateIoU(targetDet.bbox, det.bbox);
+            const centerDist = this.calculateCenterDistance(targetDet.bbox, det.bbox);
+            const maxDim = Math.max(targetDet.bbox[2], targetDet.bbox[3]);
+            const normalizedCenterDist = centerDist / maxDim;
+            
+            // Combined score: IoU + center distance + confidence
+            // 组合分数：IoU + 中心距离 + 置信度
+            const score = iou * 0.6 + (1 - Math.min(1, normalizedCenterDist)) * 0.3 + det.score * 0.1;
+            
+            if (score > bestScore && iou > 0.3) {
+                bestScore = score;
+                bestMatch = det;
+            }
+        });
+        
+        return bestMatch;
+    }
+    
+    /**
+     * Calculate center distance between two bounding boxes
+     * 计算两个边界框之间的中心距离
+     */
+    calculateCenterDistance(bbox1, bbox2) {
+        const [x1, y1, w1, h1] = bbox1;
+        const [x2, y2, w2, h2] = bbox2;
+        
+        const cx1 = x1 + w1 / 2;
+        const cy1 = y1 + h1 / 2;
+        const cx2 = x2 + w2 / 2;
+        const cy2 = y2 + h2 / 2;
+        
+        return Math.sqrt((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2);
+    }
+    
+    /**
+     * Fuse multiple detections into a single, more accurate detection
+     * 将多个检测融合为单个更准确的检测
+     */
+    fuseDetections(detections) {
+        if (detections.length === 0) return null;
+        if (detections.length === 1) return detections[0];
+        
+        // Weight more recent detections higher
+        // 给更近期的检测更高权重
+        const weights = detections.map((_, idx) => Math.pow(0.8, detections.length - 1 - idx));
+        const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+        
+        // Weighted average of bounding boxes
+        // 边界框的加权平均
+        let fusedX = 0, fusedY = 0, fusedW = 0, fusedH = 0;
+        let fusedScore = 0;
+        
+        detections.forEach((det, idx) => {
+            const weight = weights[idx] / totalWeight;
+            const [x, y, w, h] = det.bbox;
+            
+            fusedX += x * weight;
+            fusedY += y * weight;
+            fusedW += w * weight;
+            fusedH += h * weight;
+            fusedScore += det.score * weight;
+        });
+        
+        // Use the most recent detection as base and update bbox
+        // 使用最近的检测作为基础并更新边界框
+        const baseDet = detections[0];
+        
+        return {
+            ...baseDet,
+            bbox: [fusedX, fusedY, fusedW, fusedH],
+            score: fusedScore,
+            // Add fusion metadata
+            // 添加融合元数据
+            fusionInfo: {
+                frameCount: detections.length,
+                confidence: fusedScore,
+                stability: detections.length / this.maxBufferSize
+            }
+        };
     }
 }
 
