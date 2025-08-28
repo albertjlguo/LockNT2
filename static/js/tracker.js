@@ -80,7 +80,7 @@
    * 用于目标追踪的卡尔曼滤波器
    */
   class KalmanFilter {
-    constructor(initialX, initialY) {
+    constructor(initialX, initialY, opts = {}) {
       // State vector [x, y, vx, vy]
       // 状态向量 [x位置, y位置, x速度, y速度]
       this.x = [initialX, initialY, 0, 0];
@@ -114,7 +114,7 @@
 
       // Process noise covariance (Q)
       // 过程噪声协方差
-      this.Q = [
+      this.Q = opts.Q || [
         [1, 0, 0, 0],
         [0, 1, 0, 0],
         [0, 0, 10, 0],
@@ -123,7 +123,7 @@
 
       // Measurement noise covariance (R)
       // 测量噪声协方差
-      this.R = [
+      this.R = opts.R || [
         [5, 0],
         [0, 5]
       ];
@@ -416,6 +416,8 @@
    */
   class AppearanceEncoder {
     constructor(opts = {}) {
+      this.imageWidth = opts.imageWidth || 640; // Reference image width
+      this.imageHeight = opts.imageHeight || 480; // Reference image height
       // Increased bins for better discrimination in crowded scenes
       // 增加直方图bins以在密集场景中提高区分度
       this.binsH = opts.binsH || 20;  // Increased from 16
@@ -429,16 +431,33 @@
       this.spatialGridH = opts.spatialGridH || 3;
       this.spatialGridW = opts.spatialGridW || 3;
       
-      const colorDim = this.binsH * this.binsS * this.binsV;
-      const spatialDim = this.spatialGridH * this.spatialGridW * 4; // 4 basic color stats per cell
-      this.totalDim = colorDim + spatialDim;
-      
+      this.totalDim = this.binsH * this.binsS * this.binsV;
       this._tmp = new Float32Array(this.totalDim);
-      this._spatialTmp = new Float32Array(spatialDim);
+      this.spatialDim = this.totalDim * this.spatialGridW * this.spatialGridH;
+      this._spatialTmp = new Float32Array(this.spatialDim);
     }
 
-    /** Enhanced feature extraction with spatial information for better ID consistency */
-    extract(ctx, bbox) {
+    async encode(ctx, bbox) {
+      const colorFeature = await this._computeColorFeature(ctx, bbox);
+      if (!colorFeature) return null;
+
+      const geometricFeature = this._extractGeometricFeatures(bbox);
+      return { color: colorFeature, geometric: geometricFeature };
+    }
+
+    _extractGeometricFeatures(bbox) {
+      const { x, y, w, h, confidence } = bbox;
+      const aspectRatio = w / (h + 1e-6);
+      const normalizedArea = (w * h) / (this.imageWidth * this.imageHeight);
+      const normalizedX = (x + w / 2) / this.imageWidth;
+      const normalizedY = (y + h / 2) / this.imageHeight;
+
+      // Feature vector: [aspectRatio, normalizedArea, confidence, normalizedX, normalizedY]
+      return [aspectRatio, normalizedArea, confidence || 0.5, normalizedX, normalizedY];
+    }
+
+    /** Extracts color histogram feature */
+    async _computeColorFeature(ctx, bbox) {
       const x = bbox.x + (1 - this.innerCrop) * 0.5 * bbox.w;
       const y = bbox.y + (1 - this.innerCrop) * 0.5 * bbox.h;
       const w = bbox.w * this.innerCrop;
@@ -473,53 +492,7 @@
         }
       }
 
-      // Extract spatial grid features for better discrimination
-      // 提取空间网格特征以提高区分度
-      const cellW = iw / this.spatialGridW;
-      const cellH = ih / this.spatialGridH;
-      
-      for (let gy = 0; gy < this.spatialGridH; gy++) {
-        for (let gx = 0; gx < this.spatialGridW; gx++) {
-          const cellStartX = Math.floor(gx * cellW);
-          const cellStartY = Math.floor(gy * cellH);
-          const cellEndX = Math.min(iw, Math.floor((gx + 1) * cellW));
-          const cellEndY = Math.min(ih, Math.floor((gy + 1) * cellH));
-          
-          let cellPixels = 0;
-          let avgR = 0, avgG = 0, avgB = 0, avgV = 0;
-          
-          for (let yy = cellStartY; yy < cellEndY; yy += step) {
-            for (let xx = cellStartX; xx < cellEndX; xx += step) {
-              const p = (yy * iw + xx) * 4;
-              const r = data[p], g = data[p + 1], b = data[p + 2];
-              const { v: V } = rgbToHsv(r, g, b);
-              
-              avgR += r; avgG += g; avgB += b; avgV += V;
-              cellPixels++;
-            }
-          }
-          
-          if (cellPixels > 0) {
-            avgR /= cellPixels; avgG /= cellPixels; avgB /= cellPixels; avgV /= cellPixels;
-          }
-          
-          // Store spatial features: normalized RGB + brightness
-          // 存储空间特征：归一化RGB + 亮度
-          const spatialIdx = (gy * this.spatialGridW + gx) * 4;
-          spatialFeats[spatialIdx] = avgR / 255;
-          spatialFeats[spatialIdx + 1] = avgG / 255;
-          spatialFeats[spatialIdx + 2] = avgB / 255;
-          spatialFeats[spatialIdx + 3] = avgV;
-        }
-      }
-
-      // Combine color and spatial features
-      // 结合颜色和空间特征
-      const combinedFeature = new Float32Array(this.totalDim);
-      combinedFeature.set(hist, 0);
-      combinedFeature.set(spatialFeats, colorDim);
-      
-      return l2normalize(combinedFeature);
+      return l2normalize(hist);
     }
 
     /** Compute appearance distance in [0,1] (1 - cosine similarity) */
@@ -537,10 +510,10 @@
       this.cx = bbox.x + bbox.w / 2; // center
       this.cy = bbox.y + bbox.h / 2;
       this.w = bbox.w; this.h = bbox.h;
-      this.kalmanFilter = new KalmanFilter(this.cx, this.cy);
+      this.kalmanFilter = new KalmanFilter(this.cx, this.cy, opts.kalman);
       this.locked = !!opts.locked;
       this.color = COLOR_POOL[(id - 1) % COLOR_POOL.length];
-      this.feature = null; // EMA feature
+      this.feature = null; // EMA feature { color, geometric }
       this.lostFrames = 0;
       this.hits = 1;
       this.trajectory = [];
@@ -653,139 +626,25 @@
       }
     }
     
-    /** Update appearance model with template management */
+    /** Update appearance model with EMA */
     updateAppearanceModel(newFeature) {
-      if (!this.feature || this.feature.length !== newFeature.length) {
-        // Initialize first template
-        // 初始化第一个模板
-        this.feature = newFeature;
-        this.appearanceModel.templates = [newFeature];
-        this.appearanceModel.weights = [1.0];
-        return;
-      }
-      
-      // Calculate similarity with existing templates
-      // 计算与现有模板的相似度
-      const similarities = this.appearanceModel.templates.map(template => 
-        cosineSimilarity(newFeature, template)
-      );
-      
-      const maxSimilarity = Math.max(...similarities);
-      const bestTemplateIdx = similarities.indexOf(maxSimilarity);
-      
-      if (maxSimilarity > this.appearanceModel.updateThreshold) {
-        // Update existing template with adaptive learning rate
-        // 使用自适应学习率更新现有模板
-        const mu = Math.min(0.4, 0.1 + (1 - maxSimilarity) * 0.6); // Adaptive learning rate
-        for (let i = 0; i < this.feature.length; i++) {
-          this.appearanceModel.templates[bestTemplateIdx][i] = 
-            (1 - mu) * this.appearanceModel.templates[bestTemplateIdx][i] + mu * newFeature[i];
+      const alpha = 0.2; // EMA smoothing factor
+      if (this.feature && this.feature.color && this.feature.geometric) {
+        // EMA update for color histogram
+        for (let i = 0; i < this.feature.color.length; i++) {
+          this.feature.color[i] = (1 - alpha) * this.feature.color[i] + alpha * newFeature.color[i];
         }
-        l2normalize(this.appearanceModel.templates[bestTemplateIdx]);
-        
-        // Update weights based on similarity
-        // 基于相似度更新权重
-        this.appearanceModel.weights[bestTemplateIdx] = Math.min(1.0, 
-          this.appearanceModel.weights[bestTemplateIdx] + 0.1);
-        
-        // Update main feature to best template
-        // 将主特征更新为最佳模板
-        this.feature = this.appearanceModel.templates[bestTemplateIdx];
+        l2normalize(this.feature.color);
+
+        // EMA update for geometric features
+        for (let i = 0; i < this.feature.geometric.length; i++) {
+          this.feature.geometric[i] = (1 - alpha) * this.feature.geometric[i] + alpha * newFeature.geometric[i];
+        }
       } else {
-        // Add new template if we have space
-        // 如果有空间则添加新模板
-        if (this.appearanceModel.templates.length < this.appearanceModel.maxTemplates) {
-          this.appearanceModel.templates.push(newFeature);
-          this.appearanceModel.weights.push(0.5);
-        } else {
-          // Replace least weighted template
-          // 替换权重最小的模板
-          const minWeightIdx = this.appearanceModel.weights.indexOf(
-            Math.min(...this.appearanceModel.weights)
-          );
-          this.appearanceModel.templates[minWeightIdx] = newFeature;
-          this.appearanceModel.weights[minWeightIdx] = 0.5;
-        }
-      }
-      
-      // Normalize weights
-      // 归一化权重
-      const totalWeight = this.appearanceModel.weights.reduce((sum, w) => sum + w, 0);
-      if (totalWeight > 0) {
-        this.appearanceModel.weights = this.appearanceModel.weights.map(w => w / totalWeight);
+        this.feature = newFeature;
       }
     }
-    
-    /** Enhanced appearance matching with ID consistency checks */
-    getAppearanceMatchScore(feature, candidateDetection = null) {
-      if (!feature || this.appearanceModel.templates.length === 0) return 0;
       
-      // Calculate weighted similarities with enhanced discrimination
-      // 计算加权相似度，增强区分能力
-      const similarities = this.appearanceModel.templates.map((template, idx) => {
-        const similarity = cosineSimilarity(feature, template);
-        return {
-          similarity: similarity,
-          weightedSim: similarity * this.appearanceModel.weights[idx],
-          templateIdx: idx
-        };
-      });
-      
-      // Find best matches
-      // 寻找最佳匹配
-      const sortedSims = similarities.sort((a, b) => b.weightedSim - a.weightedSim);
-      const bestMatch = sortedSims[0];
-      const secondBest = sortedSims[1] || { weightedSim: 0 };
-      
-      // Calculate discrimination ratio - higher is better for unique identification
-      // 计算区分比率 - 越高越有利于唯一识别
-      const discriminationRatio = sortedSims.length > 1 ? 
-        (bestMatch.weightedSim - secondBest.weightedSim) / (bestMatch.weightedSim + 1e-6) : 1.0;
-      
-      // Base similarity score
-      // 基础相似度分数
-      const maxSimilarity = bestMatch.weightedSim;
-      const avgSimilarity = similarities.reduce((sum, sim) => sum + sim.weightedSim, 0) / similarities.length;
-      const baseScore = 0.6 * maxSimilarity + 0.4 * avgSimilarity;
-      
-      // Apply discrimination bonus for highly distinctive matches
-      // 对高区分度匹配应用奖励
-      const discriminationBonus = discriminationRatio > 0.3 ? discriminationRatio * 0.2 : 0;
-      
-      // Check consistency with recent matches for ID stability
-      // 检查与最近匹配的一致性以保持ID稳定性
-      let consistencyBonus = 0;
-      if (this.idConsistency.recentMatches.length > 0) {
-        const recentAvgSim = this.idConsistency.recentMatches
-          .slice(-3) // Last 3 matches
-          .reduce((sum, match) => sum + match.similarity, 0) / Math.min(3, this.idConsistency.recentMatches.length);
-        
-        // Bonus for consistency with recent successful matches
-        // 与最近成功匹配一致性的奖励
-        if (Math.abs(baseScore - recentAvgSim) < 0.2) {
-          consistencyBonus = 0.1;
-        }
-      }
-      
-      const finalScore = Math.min(1.0, baseScore + discriminationBonus + consistencyBonus);
-      
-      // Record this match for consistency tracking
-      // 记录此匹配以进行一致性跟踪
-      this.idConsistency.recentMatches.push({
-        similarity: finalScore,
-        timestamp: Date.now(),
-        templateIdx: bestMatch.templateIdx
-      });
-      
-      // Maintain match history size
-      // 维护匹配历史大小
-      if (this.idConsistency.recentMatches.length > this.idConsistency.maxMatchHistory) {
-        this.idConsistency.recentMatches.shift();
-      }
-      
-      return finalScore;
-    }
-    
     /** Check if track should enter occlusion state with improved logic */
     checkOcclusionState(frameCount) {
       // Different thresholds for locked vs unlocked tracks
@@ -816,6 +675,7 @@
       this.tracks = [];
       this.idManager = new IDManager(); // Use ID manager instead of simple counter
       this.hungarian = new HungarianAlgorithm(); // Hungarian algorithm for optimal assignment
+      this.kalmanParams = opts.kalman || {}; // Store kalman params for new tracks
       this.encoder = new AppearanceEncoder(opts.encoder || {});
       this.enableReID = opts.enableReID !== false; // default true
       this.focusClasses = opts.focusClasses || ['person'];
@@ -882,7 +742,7 @@
     }
 
     /** Main update with detections (canvas-space bboxes). ctx is 2D context for appearance. */
-    update(detections, ctx, options = {}) {
+    async update(detections, videoContext, options = {}) {
       // Extract tracking-first mode options
       // 提取追踪优先模式选项
       const trackingFirstMode = options.trackingFirstMode || false;
@@ -899,12 +759,12 @@
 
       // Optionally compute appearance features (only for focus classes and limited count)
       let enriched = dets;
-      if (this.enableReID && ctx) {
+      if (this.enableReID && videoContext) {
         const maxFeat = 15; // cap to save cost
         enriched = dets.map((dd, idx) => {
           let feat = null;
           if (!this.focusClasses.length || this.focusClasses.includes(dd.class)) {
-            if (idx < maxFeat) feat = this.encoder.extract(ctx, dd) || null;
+            if (idx < maxFeat) feat = this.encoder.encode(videoContext, dd) || null;
           }
           return { ...dd, feature: feat };
         });
@@ -1078,7 +938,7 @@
         // Adaptive gating
         // 自适应门控
         const velocityMagnitude = Math.sqrt((t.vx || 0) ** 2 + (t.vy || 0) ** 2);
-        const velocityFactor = Math.min(3.0, 1.0 + velocityMagnitude / 50);
+        const velocityFactor = Math.min(3.0, 1.0 + velocityMagnitude / 50); // Scale with velocity
         let gating = Math.max(this.gatingBase, 0.5 * Math.hypot(t.w, t.h)) * velocityFactor;
         
         if (t.occlusionState && t.occlusionState.isOccluded) {
@@ -1095,11 +955,10 @@
           const i = iou(tb, db);
           const ctr = centerDistance(tb, db);
           
-          // Gating check
-          // 门控检查
           const gatingMultiplier = (t.occlusionState && t.occlusionState.isOccluded) ? 3.0 : 2.5;
+          // More permissive gating for locked tracks
+          // 对锁定轨迹更宽松的门控
           const finalGatingMultiplier = t.locked ? gatingMultiplier * 1.2 : gatingMultiplier;
-          
           if (i < 0.005 && ctr > gating * finalGatingMultiplier) {
             row.push(maxCost);
             continue;
@@ -1156,7 +1015,7 @@
           const velocityConfidence = Math.min(1.0, t.hits / 10);
           const adaptiveMotionGating = gating * (0.5 + 0.5 * velocityConfidence);
           const motionCost = clamp(motionDist / adaptiveMotionGating, 0, 1);
-          
+
           // Adaptive weights
           // 自适应权重
           let wIoU = this.wIoU, wApp = this.wApp, wCtr = this.wCtr;
@@ -1182,9 +1041,12 @@
           if (stabilityFactor > 0.8) {
             wMotion *= 1.2;
           }
+
+          // Enhanced cost calculation with trajectory consistency and ID switch prevention
+          // 增强成本计算，包含轨迹一致性和ID切换防护
           
-          // Trajectory consistency penalty
-          // 轨迹一致性惩罚
+          // Trajectory consistency check - penalize unrealistic movements
+          // 轨迹一致性检查 - 惩罚不现实的运动
           let trajConsistencyPenalty = 0;
           if (t.trajectory.length >= 3) {
             const recent = t.trajectory.slice(-3);
@@ -1193,15 +1055,20 @@
             const expectedX = t.cx + avgVelX;
             const expectedY = t.cy + avgVelY;
             
+            const detCenterX = d.x + d.w / 2;
+            const detCenterY = d.y + d.h / 2;
             const trajDeviation = Math.sqrt((expectedX - detCenterX)**2 + (expectedY - detCenterY)**2);
+            
+            // Penalize large trajectory deviations
+            // 惩罚大的轨迹偏差
             const maxReasonableDeviation = Math.max(50, Math.hypot(t.w, t.h) * 0.8);
             if (trajDeviation > maxReasonableDeviation) {
               trajConsistencyPenalty = Math.min(0.4, trajDeviation / maxReasonableDeviation * 0.2);
             }
           }
           
-          // Size consistency penalty
-          // 尺寸一致性惩罚
+          // Size consistency penalty for dramatic size changes
+          // 尺寸一致性惩罚，防止剧烈尺寸变化
           const sizeChangeRatio = Math.max(d.w/t.w, t.w/d.w) * Math.max(d.h/t.h, t.h/d.h);
           const sizeConsistencyPenalty = sizeChangeRatio > 2.0 ? Math.min(0.3, (sizeChangeRatio - 2.0) * 0.1) : 0;
           
@@ -1292,26 +1159,6 @@
               const matchScore = t.getAppearanceMatchScore(d.feature, d);
               app = 1 - matchScore;
               
-              // Apply ID switch penalty for suspicious matches
-              // 对可疑匹配应用ID切换惩罚
-              if (matchScore < t.appearanceModel.discriminativeThreshold) {
-                // Check if this detection might be better matched to another track
-                // 检查此检测是否可能更好地匹配到其他轨迹
-                let betterMatchExists = false;
-                for (const otherTrack of this.tracks) {
-                  if (otherTrack.id !== t.id && otherTrack.getAppearanceMatchScore) {
-                    const otherScore = otherTrack.getAppearanceMatchScore(d.feature, d);
-                    if (otherScore > matchScore + 0.15) { // Significant difference
-                      betterMatchExists = true;
-                      break;
-                    }
-                  }
-                }
-                
-                if (betterMatchExists) {
-                  idSwitchPenalty = t.idConsistency.switchPenalty;
-                }
-              }
             } else if (t.feature) {
               app = clamp(1 - cosineSimilarity(t.feature, d.feature), 0, 1);
             } else {
@@ -1319,7 +1166,7 @@
               app = 0.3;
             }
           }
-
+          
           const ratioT = (t.w / (t.h + 1e-3));
           const ratioD = (d.w / (d.h + 1e-3));
           const ratioDiff = Math.min(1, Math.abs(ratioT - ratioD) / Math.max(ratioT, ratioD));
@@ -1351,8 +1198,6 @@
           const stabilityFactor = Math.min(1.0, (t.hits - t.lostFrames) / Math.max(1, t.hits));
           
           if (isLockedPass) {
-            // Locked tracks: prioritize appearance and motion over IoU
-            // 锁定轨迹：优先考虑外观和运动而非IoU
             wIoU = Math.max(0.15, this.wIoU - 0.15);
             wApp = Math.min(0.45, this.wApp + 0.15);
             wCtr = Math.min(0.25, this.wCtr + 0.10);
@@ -1417,8 +1262,11 @@
       const usedT = new Set();
       
       for (const p of pairs) {
-        const track = trackList[p.ti];
-        
+        const trackOpts = {
+          locked: isLocked,
+          class: bbox.class,
+          kalman: this.kalmanParams
+        };
         // Adaptive threshold based on scene complexity and track state
         // 基于场景复杂度和轨迹状态的自适应阈值
         let threshold = this.costThreshold;
@@ -1513,8 +1361,8 @@
           // Appearance similarity check (if available)
           // 外观相似性检查（如果可用）
           let appearanceScore = 0.5; // Default neutral score
-          if (det.feature && track.getAppearanceMatchScore) {
-            appearanceScore = track.getAppearanceMatchScore(det.feature);
+          if (det.feature && track.getAppearanceCost) {
+            appearanceScore = 1 - track.getAppearanceCost(det.feature);
           }
           
           // Size consistency check
@@ -1610,6 +1458,27 @@
       }
     }
 
+    _getAppearanceCost(track, detBbox, detFeature) {
+      if (!track.feature || !detFeature || !track.feature.color || !detFeature.color) return 1.0;
+
+      // 1. Color Feature Cost (Cosine Distance)
+      const colorCost = 1 - cosineSimilarity(track.feature.color, detFeature.color);
+
+      // 2. Geometric Feature Cost (Normalized Euclidean Distance)
+      let geoDist = 0;
+      const geoWeights = [1, 1, 2, 0.5, 0.5]; // Weights for [aspect, area, conf, x, y]
+      for (let i = 0; i < track.feature.geometric.length; i++) {
+        const diff = track.feature.geometric[i] - detFeature.geometric[i];
+        geoDist += (diff * diff) * geoWeights[i];
+      }
+      const geometricCost = Math.min(1.0, Math.sqrt(geoDist) / track.feature.geometric.length);
+
+      // 3. Combine costs (50% color, 50% geometric)
+      const combinedCost = 0.5 * colorCost + 0.5 * geometricCost;
+      
+      return combinedCost;
+    }
+
     /** Remove stale tracks and release their IDs */
     _prune() {
       const beforeCount = this.tracks.length;
@@ -1678,12 +1547,12 @@
     }
 
     /** Public: lock a track by clicking a point on canvas */
-    lockFromPoint(x, y, detections, ctx) {
+    async lockOn(point, detections, videoContext) {
       if (!detections || detections.length === 0) return null;
       // find detections containing point
       const candidates = detections
         .map((d, i) => ({ i, d, box: { x: d.bbox[0] ?? d.x, y: d.bbox[1] ?? d.y, w: d.bbox[2] ?? d.w, h: d.bbox[3] ?? d.h } }))
-        .filter(o => x >= o.box.x && y >= o.box.y && x <= o.box.x + o.box.w && y <= o.box.y + o.box.h)
+        .filter(o => point.x >= o.box.x && point.y >= o.box.y && point.x <= o.box.x + o.box.w && point.y <= o.box.y + o.box.h)
         .sort((a, b) => (b.d.score || 0) - (a.d.score || 0));
 
       let chosen = candidates[0];
@@ -1694,7 +1563,7 @@
           const d = detections[i];
           const box = { x: d.bbox?.[0] ?? d.x, y: d.bbox?.[1] ?? d.y, w: d.bbox?.[2] ?? d.w, h: d.bbox?.[3] ?? d.h };
           const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
-          const dist = Math.hypot(cx - x, cy - y);
+          const dist = Math.hypot(cx - point.x, cy - point.y);
           if (dist < bestDist) { bestDist = dist; best = { i, d, box }; }
         }
         if (best) chosen = best;
@@ -1711,7 +1580,7 @@
       }
 
       // Otherwise create a new locked track
-      const feature = (this.enableReID && ctx) ? this.encoder.extract(ctx, chosen.box) : null;
+      const feature = await this.encoder.encode(videoContext, chosen.box);
       return this._createTrackFromDet({ ...chosen.box, class: chosen.d.class || 'object' }, feature, true);
     }
 

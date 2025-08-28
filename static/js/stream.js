@@ -27,10 +27,25 @@ class StreamManager {
         
         // Tracking & detection throttle config
         // 追踪与检测节流配置
+        const kalmanParams = {
+          Q: [
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+          ],
+          R: [
+            [25, 0],
+            [0, 25]
+          ]
+        };
+
         this.tracker = new window.Tracker({
-            enableReID: true,
-            focusClasses: ['person'],
-            autoCreate: false
+          enableReID: true,
+          focusClasses: ['person', 'car'],
+          maxLostUnlocked: 20,
+          maxLostLocked: 80,
+          kalman: kalmanParams
         });
         this.detectEveryMs = 500; // Adjusted from 300ms for user request
         this.lastDetectionTime = 0;
@@ -714,8 +729,8 @@ class StreamManager {
             return;
         }
 
-        let id = this.tracker.lockFromPoint(x, y, this.lastScaledPredictions || [], this.videoContext);
-        if (!id && this.frameImage && window.detectionManager && window.detectionManager.isModelLoaded) {
+        const lockedId = await this.tracker.lockOn({ x, y }, this.lastScaledPredictions || [], this.videoContext);
+        if (!lockedId && this.frameImage && window.detectionManager && window.detectionManager.isModelLoaded) {
             // One-shot detection fallback to ensure immediate lock on click
             try {
                 const predictions = await window.detectionManager.detectObjects(this.frameImage);
@@ -726,13 +741,15 @@ class StreamManager {
                     return { bbox: [bx * scaleX2, by * scaleY2, bw * scaleX2, bh * scaleY2], score: p.score, class: p.class };
                 });
                 this.lastScaledPredictions = scaled;
-                if (this.tracker && this.videoContext) this.tracker.update(scaled, this.videoContext);
-                id = this.tracker.lockFromPoint(x, y, this.lastScaledPredictions || [], this.videoContext);
+                if (this.tracker && this.videoContext) await this.tracker.update(scaled, this.videoContext);
+                const newLockId = await this.tracker.lockOn({ x, y }, this.lastScaledPredictions || [], this.videoContext);
+                if (newLockId) id = newLockId;
             } catch (err) {
                 console.warn('One-shot detection on click failed:', err);
             }
         }
 
+        let id = lockedId;
         if (id) {
             // Get the track to show its class in the alert
             // 获取追踪目标以在提示中显示其类别
