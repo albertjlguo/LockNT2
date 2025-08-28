@@ -128,6 +128,8 @@ def video_feed_mjpeg():
         stall_timeout = 4.0  # seconds without new frames triggers reconnect
         heartbeat_interval = 2.0  # seconds; send a keepalive chunk to prevent worker timeout
         min_frame_interval = 1.0 / 15.0  # Pace to ~15 FPS
+        last_sent_frame = None  # Cache last successfully sent JPEG for heartbeat
+        # 说明：缓存上一帧，在无新帧或latest为空时用于心跳保活，避免Gunicorn超时
         while stream_processor and getattr(stream_processor, 'is_running', False):
             try:
                 # Use buffered frame with age limit for smoother delivery
@@ -168,6 +170,9 @@ def video_feed_mjpeg():
                            b"X-Timestamp: " + timestamp.encode() + b"\r\n"
                            b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
                            b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+                    # Cache last successfully sent frame for future heartbeats
+                    # 缓存最近成功发送的帧，用于后续心跳保活
+                    last_sent_frame = frame
                 else:
                     # If no progress for too long, break to trigger client reconnection
                     # 若长时间无新帧，断开以触发客户端重连
@@ -179,29 +184,36 @@ def video_feed_mjpeg():
                     now_ts = time.time()
                     if now_ts - last_send_ts >= heartbeat_interval:
                         last_send_ts = now_ts
-                        latest = stream_processor.get_latest_frame() if stream_processor else None
-                        if latest:
-                            timestamp = str(int(time.time() * 1000))
+                        # Prefer latest; fallback to last_sent_frame if latest is unavailable
+                        # 优先使用最新帧；若不可用则回退至最近发送的帧
+                        heartbeat_frame = None
+                        if stream_processor:
+                            heartbeat_frame = stream_processor.get_latest_frame()
+                        if not heartbeat_frame:
+                            heartbeat_frame = last_sent_frame
+                        if heartbeat_frame:
+                            ts_hb = str(int(time.time() * 1000))
                             yield (b"--" + boundary.encode() + b"\r\n"
                                    b"Content-Type: image/jpeg\r\n"
                                    b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
                                    b"Pragma: no-cache\r\n"
                                    b"Expires: 0\r\n"
-                                   b"X-Timestamp: " + timestamp.encode() + b"\r\n"
+                                   b"X-Timestamp: " + ts_hb.encode() + b"\r\n"
                                    b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
-                                   b"Content-Length: " + str(len(latest)).encode() + b"\r\n\r\n" + latest + b"\r\n")
-                        else:
-                            time.sleep(0.05)
+                                   b"Content-Length: " + str(len(heartbeat_frame)).encode() + b"\r\n\r\n" + heartbeat_frame + b"\r\n")
+                        # If no frame at all, fall through to brief sleep to avoid busy loop
+                        # 若完全无帧可发，则短暂休眠以避免空转
                     else:
-                        # Brief sleep to avoid busy loop
-                        time.sleep(0.05)
+                        # Brief sleep to avoid busy loop but keep it short to not risk timeout
+                        # 短暂休眠避免空转，但保持很短以降低超时风险
+                        time.sleep(0.02)
                     
             except GeneratorExit:
                 break
             except Exception as e:
                 logging.error(f"Error in enhanced MJPEG generator: {e}")
                 # Brief pause to avoid tight loop
-                time.sleep(0.05)
+                time.sleep(0.02)
 
     return Response(generate(), 
                     mimetype='multipart/x-mixed-replace; boundary=frame',

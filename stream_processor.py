@@ -221,16 +221,18 @@ class StreamProcessor:
                         
                         # Adaptive frame rate control for smoother streaming
                         # 自适应帧率控制以提升流畅度
+                        # Measure processing time for this iteration BEFORE using it
+                        # 在使用 processing_time 前先计算本次循环处理时长
+                        processing_time = time.time() - now
                         # Adaptive FPS: lower when processing is slow to prevent backlog
                         # 自适应FPS：处理慢时降低帧率，避免堆积
-                        target_fps = 24  # base lower fps for stability
+                        target_fps = 24  # base lower fps for stability / 更稳定的基础FPS
                         if processing_time > 1.0 / 22:
                             target_fps = 20
                         if processing_time > 1.0 / 18:
                             target_fps = 18
                         frame_time = 1.0 / target_fps
-                        processing_time = time.time() - now
-                        sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep
+                        sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep / 至少1毫秒
                         time.sleep(sleep_time)
 
                         # Stall detection: if no successful frame for >3s, reconnect
