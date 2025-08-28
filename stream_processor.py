@@ -16,7 +16,10 @@ class StreamProcessor:
         self.latest_frame = None
         self.frame_count = 0
         self.fps = 0
-        self.last_time = time.time()
+        # FPS measurement window state
+        # FPS 计算使用滑动窗口统计
+        self._fps_window_start = time.time()
+        self._fps_window_count = 0
         self.lock = threading.Lock()
 
     def validate_stream(self):
@@ -107,7 +110,9 @@ class StreamProcessor:
                 self.is_running = True
                 logging.info("Started video processing")
                 
-                frame_time_start = time.time()
+                # Reset FPS window when (re)starting
+                self._fps_window_start = time.time()
+                self._fps_window_count = 0
                 consecutive_failures = 0
                 max_consecutive_failures = 10
                 
@@ -134,12 +139,17 @@ class StreamProcessor:
                             logging.warning("Received empty frame")
                             continue
                         
-                        # Update frame count and FPS
+                        # Update frame counters and FPS (1-second window)
+                        # 更新帧计数与 FPS（1 秒窗口）
                         self.frame_count += 1
-                        current_time = time.time()
-                        if current_time - frame_time_start >= 1.0:
-                            self.fps = self.frame_count / (current_time - self.last_time)
-                            frame_time_start = current_time
+                        self._fps_window_count += 1
+                        now = time.time()
+                        elapsed = now - self._fps_window_start
+                        if elapsed >= 1.0:
+                            # Compute FPS for the past window and reset window counters
+                            self.fps = self._fps_window_count / elapsed
+                            self._fps_window_start = now
+                            self._fps_window_count = 0
                         
                         # Resize frame for processing
                         height, width = frame.shape[:2]

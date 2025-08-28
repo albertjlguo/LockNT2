@@ -13,12 +13,17 @@ class StreamManager {
         this.detectionInterval = null;
         this.statusInterval = null;
         
-        // Frame management for better memory usage
-        // 帧管理以优化内存使用
+        // Frame state (used for detection source)
+        // 帧状态（检测输入源）
         this.frameImage = null;
         this.frameCount = 0;
-        this.frameErrorCount = 0;
-        this.frameLoadCount = 0;
+        
+        // MJPEG streaming state for smoother playback
+        // 使用 MJPEG 推流提升流畅度
+        this.mjpegImg = null; // offscreen <img> for multipart stream
+        this.rafId = null;    // requestAnimationFrame id
+        this._mjpegErrorNotified = false; // 避免重复告警
+        this._stopping = false; // 正在主动停止标志，避免误报错误
         
         // Tracking & detection throttle config
         // 追踪与检测节流配置
@@ -222,9 +227,14 @@ class StreamManager {
      */
     async stopStream() {
         try {
+            // Mark as stopping to suppress MJPEG error handling
+            // 标记主动停止，抑制 MJPEG 错误提示/重连
+            this._stopping = true;
             // Stop local processing
             this.stopDetection();
             this.stopStatusMonitoring();
+            // Stop MJPEG stream if running  停止 MJPEG 连接
+            this.stopMjpegStream();
             
             // Send request to stop stream
             const response = await fetch('/stop_stream', {
@@ -247,10 +257,12 @@ class StreamManager {
             this.updateTrackingList();
             
             this.showAlert('Stream stopped', 'info');
+            this._stopping = false;
             
         } catch (error) {
             console.error('Error stopping stream:', error);
             this.showAlert(error.message, 'danger');
+            this._stopping = false;
         }
     }
 
@@ -300,122 +312,107 @@ class StreamManager {
      * Start frame fetching from backend
      */
     startFrameFetching() {
-        console.log('Starting frame fetching...');
-        
-        this.frameLoadCount = 0;
-        this.frameErrorCount = 0;
-        
-        // Start fetching frames
-        this.fetchNextFrame();
+        console.log('Starting MJPEG streaming...');
+        this.startMjpegStream();
     }
-    
+
     /**
-     * Fetch next frame from backend
+     * Start MJPEG streaming via <img> and draw to canvas with rAF
+     * 通过 <img> 拉取 MJPEG，并使用 rAF 绘制到画布
      */
-    fetchNextFrame() {
-        if (!this.isActive) return;
-        
-        // Reuse image object or create new one for better memory management
-        // 重用图像对象或创建新对象以优化内存管理
-        if (!this.frameImage) {
-            this.frameImage = new Image();
-            this.frameImage.crossOrigin = 'anonymous';
-        } else {
-            // Clear previous image source to free memory
-            // 清空之前的图像源以释放内存
-            this.frameImage.src = '';
-        }
-        
-        // Set up event handlers for the new image
-        this.frameImage.onload = () => {
-            if (this.debug) console.log('Frame loaded:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
-            
-            // Validate canvas context exists
-            if (!this.videoContext) {
-                console.error('Video context not available!');
-                return;
+    startMjpegStream() {
+        try {
+            // Reset error notify flag when starting a new MJPEG session
+            this._mjpegErrorNotified = false;
+            if (!this.mjpegImg) {
+                this.mjpegImg = new Image();
+                this.mjpegImg.crossOrigin = 'anonymous';
             }
+            // Set current frame source for detection to mjpeg image
+            this.frameImage = this.mjpegImg;
             
-            // Validate frame dimensions
-            if (this.frameImage.naturalWidth === 0 || this.frameImage.naturalHeight === 0) {
-                console.warn('Invalid frame dimensions:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
-                this.frameErrorCount++;
-                if (this.frameErrorCount >= 10) {
-                    this.stopDetection();
-                    this.handleStreamError('Invalid frame dimensions');
+            // Handlers
+            this.mjpegImg.onload = () => {
+                // First frame arrived; start draw loop on demand
+                if (!this.rafId && this.isActive) {
+                    this.drawLoop();
+                }
+            };
+            this.mjpegImg.onerror = (e) => {
+                console.warn('MJPEG stream error', e);
+                // Notify once and attempt lightweight retry without switching mode
+                if (this._stopping || !this.isActive) {
+                    // If stopping or already inactive, do nothing (user-initiated stop)
                     return;
                 }
-                setTimeout(() => this.fetchNextFrame(), 100);
-                return;
+                if (!this._mjpegErrorNotified) {
+                    this._mjpegErrorNotified = true;
+                    this.showAlert('MJPEG 流出现错误，尝试重连…', 'warning');
+                }
+                // Retry by resetting src after a short delay
+                setTimeout(() => {
+                    if (this._stopping || !this.isActive) return;
+                    const q2 = `t=${Date.now()}&r=${Math.random()}`;
+                    this.mjpegImg.src = `/video_feed_mjpeg?${q2}`;
+                }, 1000);
+            };
+            
+            // Cache-busting query to avoid proxies caching the multipart
+            const q = `t=${Date.now()}&r=${Math.random()}`;
+            this.mjpegImg.src = `/video_feed_mjpeg?${q}`;
+        } catch (err) {
+            console.error('Failed to start MJPEG stream:', err);
+            this.showAlert('无法开始 MJPEG 流', 'danger');
+        }
+    }
+
+    /**
+     * Draw loop for MJPEG: copy current <img> to canvas, run detection throttle
+     * MJPEG 绘制循环：复制当前图像到画布，并按节流触发检测
+     */
+    drawLoop() {
+        if (!this.isActive) return;
+        if (!this.videoContext || !this.videoCanvas || !this.mjpegImg) return;
+
+        try {
+            const img = this.mjpegImg;
+            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                // Resize canvases to match stream on first frames
+                if (this.videoCanvas.width !== img.naturalWidth || this.videoCanvas.height !== img.naturalHeight) {
+                    this.setupCanvases(img.naturalWidth, img.naturalHeight);
+                }
+
+                // Draw current frame
+                this.videoContext.clearRect(0, 0, this.videoCanvas.width, this.videoCanvas.height);
+                this.videoContext.drawImage(img, 0, 0, this.videoCanvas.width, this.videoCanvas.height);
+                this.frameCount++;
+
+                // Trigger detection with existing throttle
+                if (this.isActive && window.detectionManager && window.detectionManager.isModelLoaded) {
+                    this.performDetection();
+                }
             }
-            
-            // Reset error count on successful load
-            this.frameErrorCount = 0;
-            
-            // Update canvas size if needed
-            const canvasWidth = this.videoCanvas.width;
-            const canvasHeight = this.videoCanvas.height;
-            
-            if (canvasWidth !== this.frameImage.naturalWidth || canvasHeight !== this.frameImage.naturalHeight) {
-                if (this.debug) console.log('Updating canvas size to:', this.frameImage.naturalWidth, 'x', this.frameImage.naturalHeight);
-                this.setupCanvases(this.frameImage.naturalWidth, this.frameImage.naturalHeight);
-            }
-            
-            // Clear canvas before drawing
-            this.videoContext.clearRect(0, 0, this.videoCanvas.width, this.videoCanvas.height);
-            
-            // Draw frame to canvas
-            try {
-                this.videoContext.drawImage(this.frameImage, 0, 0, this.videoCanvas.width, this.videoCanvas.height);
-                if (this.debug) console.log('Frame drawn to canvas successfully');
-            } catch (error) {
-                console.error('Error drawing frame to canvas:', error);
-                return;
-            }
-            
-            // Update frame counter
-            this.frameCount++;
-            
-            // Trigger AI detection if enabled
-            if (this.isActive && window.detectionManager && window.detectionManager.isModelLoaded) {
-                if (this.debug) console.log('Triggering AI detection...');
-                this.performDetection();
-            } else {
-                if (this.debug) console.log('AI detection not ready:', {
-                    isActive: this.isActive,
-                    detectionManager: !!window.detectionManager,
-                    modelLoaded: window.detectionManager ? window.detectionManager.isModelLoaded : false
-                });
-            }
-            
-            // Schedule next frame fetch with appropriate interval for smooth video
-            // 安排下次帧获取，使用适当间隔保证流畅视频
-            if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 50); // ~20 FPS for smooth video while reducing load
-            }
-        };
-        
-        this.frameImage.onerror = (error) => {
-            console.warn('Failed to load frame:', error);
-            console.warn('Frame URL was:', this.frameImage.src);
-            this.frameErrorCount++;
-            
-            if (this.frameErrorCount >= 10) {
-                this.stopDetection();
-                this.handleStreamError('Failed to load video frames');
-                return;
-            }
-            
-            // Continue fetching even after error to maintain video flow
-            if (this.isActive) {
-                setTimeout(() => this.fetchNextFrame(), 500);
-            }
-        };
-        
-        const timestamp = Date.now() + Math.random() * 1000; // Add randomness to prevent caching
-        const frameUrl = `./video_feed?t=${timestamp}&r=${Math.random()}`;
-        if (this.debug) console.log('Fetching frame from:', frameUrl);
-        this.frameImage.src = frameUrl;
+        } catch (err) {
+            console.warn('MJPEG draw error:', err);
+        }
+
+        // Continue the loop
+        this.rafId = requestAnimationFrame(() => this.drawLoop());
+    }
+
+    /**
+     * Stop MJPEG streaming and rAF
+     * 停止 MJPEG 推流与绘制循环
+     */
+    stopMjpegStream() {
+        if (this.rafId) {
+            cancelAnimationFrame(this.rafId);
+            this.rafId = null;
+        }
+        if (this.mjpegImg) {
+            // Reset src to terminate connection
+            this.mjpegImg.src = '';
+        }
     }
 
     /**

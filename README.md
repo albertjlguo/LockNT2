@@ -29,20 +29,24 @@ git clone https://github.com/albertjlguo/LockNT2.git
 cd LockNT2
 ```
 
-### 3. 安装依赖
+### 3. 安装依赖（Dependencies）
 
-项目使用 `uv` 进行包管理。推荐使用 `uv` 来创建虚拟环境并安装依赖。
+项目使用 `uv` 进行包管理（也可使用 `pip`）。推荐使用 `uv` 创建虚拟环境并基于锁文件安装，确保一致性。
 
 ```bash
-# 安装 uv (如果尚未安装)
-pip install uv
+# 安装 uv（如未安装） Install uv
+pip install -U uv
 
-# 创建并激活虚拟环境
+# 创建并激活虚拟环境 Create & activate venv
 uv venv
 source .venv/bin/activate
 
-# 安装依赖
-uv pip install -r requirements.txt
+# 基于锁文件安装（首选）Install from lockfile (preferred)
+uv pip install -r uv.lock
+
+# 如果 uv 版本不支持上行命令，可临时按需安装（备选）
+# As a fallback, install packages explicitly
+uv pip install flask opencv-python yt-dlp requests werkzeug gunicorn
 ```
 
 ### 4. 运行应用
@@ -80,7 +84,7 @@ python main.py
     1.  **对用户设备有要求**：低性能设备可能会体验不佳。
     2.  **模型大小受限**：为了快速加载，只能使用轻量级的模型，精度可能不如服务器端的大模型。
 
-### 直播流获取方案：一个健壮的后端代理
+### 直播流获取方案：一个健壮的后端代理（Proxy）
 
 这是项目的首要工程挑战。直接在前端通过 JavaScript 获取并渲染第三方直播流（如 YouTube）会面临巨大的挑战，主要是浏览器的 **同源策略 (Same-Origin Policy)** 和 **跨域资源共享 (CORS)** 限制。浏览器会阻止脚本直接请求来自不同域的视频数据。
 
@@ -89,9 +93,15 @@ python main.py
 *   **后端作为代理层**：前端不直接与 YouTube 通信。相反，它将 YouTube 直播 URL 发送到我们的后端服务器。
 *   **强大的流解析工具**：后端利用 `yt-dlp` 这个强大的命令行工具。`yt-dlp` 封装了与 YouTube 复杂内部 API 通信的所有细节，能够可靠地解析出最底层的视频流媒体地址（通常是 `.m3u8` 格式）。
 *   **视频流的“转手”**：获取到流地址后，后端使用 OpenCV 的 `VideoCapture` 像播放器一样打开这个流，并逐帧读取图像。
-*   **统一的视频接口**：最后，后端将这些图像编码并通过一个自己的 API 接口（例如 `/video_feed`）提供给前端。对于前端来说，它只是在从一个同源的、简单的接口获取图像，完全绕过了跨域的复杂性。
+*   **统一的视频接口（MJPEG）**：最后，后端将这些图像编码并通过 **MJPEG** 流接口（`/video_feed_mjpeg`，`multipart/x-mixed-replace`）持续推送到前端。前端使用 `<img>` 作为数据源，并通过 `requestAnimationFrame` 将每帧绘制至 `canvas`，显著提升流畅度并降低每帧请求开销。
 
 通过这种方式，所有与 YouTube 的复杂交互都被隔离在后端，为前端提供了一个干净、稳定、无跨域问题的视频源。
+
+> 更新说明（Update Notes）
+>
+> - 已移除旧的单帧轮询接口（old polling `/video_feed`）。
+> - 新增 `/video_feed_mjpeg` 以提升播放流畅度（smoothness）。
+> - 前端仅使用 MJPEG 路径并通过 `rAF` 绘制；如断流会自动轻量重连（不会回退到旧轮询）。
 
 ## 🧠 对象追踪算法：一个轻量级的多目标追踪器
 
@@ -125,3 +135,18 @@ python main.py
 *   **外观更新**：为了适应目标外观的缓慢变化（如光照改变），追踪器的外观模型会以一个较小的学习率，用最新匹配到的目标外观来更新初始特征，实现自适应调整。
 
 通过以上设计，这个轻量级的追踪器在保证浏览器性能的同时，实现了相当鲁棒的追踪效果。
+
+## 🔒 安全与稳健性（Security & Robustness）
+
+* **严格 URL 校验（Strict URL Validation）**：后端 `routes.py` 采用白名单主机校验（`youtube.com`/`www.youtube.com`/`m.youtube.com`/`youtu.be`）并验证协议，降低 SSRF 风险。
+* **FPS 统计修复（Accurate FPS）**：`stream_processor.py` 使用 1 秒滑动窗口统计 FPS，前端状态显示更真实（useful for performance tuning）。
+* **OpenCV 超时/重连（Timeout & Retry）**：读取失败会触发短暂退避与重连，提升长时间运行稳定性。
+
+## 📌 常见问题（FAQ）
+
+1. 浏览器端播放有延迟？（Latency）
+   - 使用 MJPEG 推流，默认追求流畅度；可根据带宽/CPU 调整 JPEG 质量或前端检测频率。
+2. 停止流时提示“MJPEG 流出现错误”？
+   - 已修复：用户主动停止时不再触发错误提示或重连逻辑。
+3. 无法启动：依赖安装报错？
+   - 优先使用 `uv pip install -r uv.lock`；如仍有问题，尝试逐项安装上述关键依赖。
