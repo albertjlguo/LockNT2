@@ -12,6 +12,49 @@ class ObjectDetectionManager {
             objectCounts: {},
             recentDetections: []
         };
+        
+        // Configurable confidence thresholds
+        // 可配置的置信度阈值
+        this.confidenceThresholds = {
+            person: 0.5,  // 50%
+            car: 0.5      // 50%
+        };
+        
+        this.initializeConfidenceControls();
+    }
+
+    /**
+     * Initialize confidence control sliders
+     * 初始化置信度控制滑块
+     */
+    initializeConfidenceControls() {
+        // Person confidence slider
+        // 人物置信度滑块
+        const personSlider = document.getElementById('personConfidence');
+        const personValue = document.getElementById('personConfidenceValue');
+        
+        if (personSlider && personValue) {
+            personSlider.addEventListener('input', (e) => {
+                const value = parseInt(e.target.value);
+                this.confidenceThresholds.person = value / 100;
+                personValue.textContent = value + '%';
+                console.log(`Person confidence threshold updated to: ${value}%`);
+            });
+        }
+        
+        // Car confidence slider
+        // 汽车置信度滑块
+        const carSlider = document.getElementById('carConfidence');
+        const carValue = document.getElementById('carConfidenceValue');
+        
+        if (carSlider && carValue) {
+            carSlider.addEventListener('input', (e) => {
+                const value = parseInt(e.target.value);
+                this.confidenceThresholds.car = value / 100;
+                carValue.textContent = value + '%';
+                console.log(`Car confidence threshold updated to: ${value}%`);
+            });
+        }
     }
 
     /**
@@ -76,7 +119,8 @@ class ObjectDetectionManager {
     }
 
     /**
-     * Detect objects in a video frame
+     * Enhanced object detection with bounding box refinement
+     * 增强的目标检测，包含边界框优化
      */
     async detectObjects(videoElement) {
         if (!this.isModelLoaded || !this.model) {
@@ -85,13 +129,125 @@ class ObjectDetectionManager {
         }
 
         try {
-            const predictions = await this.model.detect(videoElement);
-            this.processDetections(predictions);
-            return predictions;
+            // Get raw predictions from COCO-SSD model
+            // 从COCO-SSD模型获取原始预测结果
+            const rawPredictions = await this.model.detect(videoElement);
+            
+            // Apply bounding box refinement and filtering
+            // 应用边界框优化和过滤
+            const refinedPredictions = this.refineBoundingBoxes(rawPredictions, videoElement);
+            
+            this.processDetections(refinedPredictions);
+            return refinedPredictions;
         } catch (error) {
             console.error('Error during object detection:', error);
             return [];
         }
+    }
+    
+    /**
+     * Refine bounding boxes for better target wrapping
+     * 优化边界框以更好地包裹目标
+     */
+    refineBoundingBoxes(predictions, videoElement) {
+        if (!predictions || predictions.length === 0) return [];
+        
+        return predictions.map(pred => {
+            // Filter to only detect persons and cars
+            // 只检测人和汽车
+            const allowedClasses = ['person', 'car'];
+            if (!allowedClasses.includes(pred.class)) {
+                return null;
+            }
+            
+            // Apply class-specific confidence filtering
+            // 应用针对类别的置信度过滤
+            const minConfidence = this.confidenceThresholds[pred.class] || 0.3;
+            if (pred.score < minConfidence) return null;
+            
+            // Refine bounding box dimensions
+            // 优化边界框尺寸
+            const refinedBbox = this.optimizeBoundingBox(pred.bbox, pred.class, pred.score);
+            
+            return {
+                ...pred,
+                bbox: refinedBbox,
+                // Add stability score for tracking
+                // 添加用于追踪的稳定性分数
+                stability: this.calculateStabilityScore(pred.score, pred.class)
+            };
+        }).filter(pred => pred !== null);
+    }
+    
+    /**
+     * Optimize bounding box based on object class and confidence
+     * 根据目标类别和置信度优化边界框
+     */
+    optimizeBoundingBox(bbox, objectClass, confidence) {
+        const [x, y, width, height] = bbox;
+        
+        // Class-specific adjustments for better wrapping
+        // 针对不同类别的特定调整以改善包裹效果
+        let adjustmentFactor = 1.0;
+        let paddingRatio = 0.05; // 5% padding by default
+        
+        switch (objectClass) {
+            case 'person':
+                // Persons often have loose bounding boxes, tighten them
+                // 人物检测框通常较松散，需要收紧
+                adjustmentFactor = 0.95;
+                paddingRatio = 0.03;
+                break;
+            case 'car':
+                // Cars need tighter boxes for better tracking
+                // 汽车需要更紧密的框以便更好追踪
+                adjustmentFactor = 0.92;
+                paddingRatio = 0.02;
+                break;
+            default:
+                // Default adjustment for person and car only
+                // 仅针对人和汽车的默认调整
+                adjustmentFactor = confidence > 0.7 ? 0.96 : 1.02;
+        }
+        
+        // Apply adjustments
+        // 应用调整
+        const centerX = x + width / 2;
+        const centerY = y + height / 2;
+        const newWidth = width * adjustmentFactor;
+        const newHeight = height * adjustmentFactor;
+        
+        // Add padding for stability
+        // 添加填充以提高稳定性
+        const paddedWidth = newWidth * (1 + paddingRatio);
+        const paddedHeight = newHeight * (1 + paddingRatio);
+        
+        return [
+            centerX - paddedWidth / 2,
+            centerY - paddedHeight / 2,
+            paddedWidth,
+            paddedHeight
+        ];
+    }
+    
+    /**
+     * Calculate stability score for tracking reliability
+     * 计算用于追踪可靠性的稳定性分数
+     */
+    calculateStabilityScore(confidence, objectClass) {
+        // Base stability from confidence
+        // 基于置信度的基础稳定性
+        let stability = confidence;
+        
+        // Class-specific stability adjustments (only for person and car)
+        // 针对人和汽车的稳定性调整
+        const classMultipliers = {
+            'person': 0.9,      // Persons are generally well detected
+            'car': 0.95         // Cars are very stable
+        };
+        
+        const multiplier = classMultipliers[objectClass] || 0.85;
+        return Math.min(1.0, stability * multiplier);
     }
 
     /**
@@ -254,6 +410,26 @@ class ObjectDetectionManager {
     addDetectionCallback(callback) {
         this.detectionCallbacks.push(callback);
     }
+    
+    /**
+     * Get detection quality metrics for tracking optimization
+     * 获取用于追踪优化的检测质量指标
+     */
+    getDetectionQuality() {
+        const recentDetections = this.detectionStats.recentDetections.slice(0, 10);
+        if (recentDetections.length === 0) return { quality: 0, stability: 0 };
+        
+        const avgConfidence = recentDetections.reduce((sum, det) => 
+            sum + parseFloat(det.confidence), 0) / recentDetections.length;
+        
+        const stability = recentDetections.length >= 5 ? 0.8 : 0.5;
+        
+        return {
+            quality: avgConfidence / 100,
+            stability: stability,
+            frameCount: recentDetections.length
+        };
+    }
 
     /**
      * Clear detection statistics
@@ -273,13 +449,110 @@ class ObjectDetectionManager {
     getStats() {
         return { ...this.detectionStats };
     }
+    
+    /**
+     * Apply temporal smoothing to reduce detection jitter
+     * 应用时间平滑以减少检测抖动
+     */
+    applyTemporalSmoothing(currentDetections, previousDetections) {
+        if (!previousDetections || previousDetections.length === 0) {
+            return currentDetections;
+        }
+        
+        return currentDetections.map(current => {
+            // Find closest previous detection
+            // 找到最接近的先前检测
+            const closest = this.findClosestDetection(current, previousDetections);
+            
+            if (closest && this.calculateIoU(current.bbox, closest.bbox) > 0.3) {
+                // Apply smoothing to reduce jitter
+                // 应用平滑以减少抖动
+                const smoothingFactor = 0.3;
+                const [cx, cy, cw, ch] = current.bbox;
+                const [px, py, pw, ph] = closest.bbox;
+                
+                return {
+                    ...current,
+                    bbox: [
+                        cx * (1 - smoothingFactor) + px * smoothingFactor,
+                        cy * (1 - smoothingFactor) + py * smoothingFactor,
+                        cw * (1 - smoothingFactor) + pw * smoothingFactor,
+                        ch * (1 - smoothingFactor) + ph * smoothingFactor
+                    ]
+                };
+            }
+            
+            return current;
+        });
+    }
+    
+    /**
+     * Find closest detection by center distance
+     * 通过中心距离找到最接近的检测
+     */
+    findClosestDetection(target, detections) {
+        const [tx, ty, tw, th] = target.bbox;
+        const tcx = tx + tw / 2;
+        const tcy = ty + th / 2;
+        
+        let closest = null;
+        let minDistance = Infinity;
+        
+        for (const det of detections) {
+            if (det.class !== target.class) continue;
+            
+            const [dx, dy, dw, dh] = det.bbox;
+            const dcx = dx + dw / 2;
+            const dcy = dy + dh / 2;
+            
+            const distance = Math.sqrt((tcx - dcx) ** 2 + (tcy - dcy) ** 2);
+            
+            if (distance < minDistance) {
+                minDistance = distance;
+                closest = det;
+            }
+        }
+        
+        return minDistance < 100 ? closest : null; // Max 100px distance
+    }
+    
+    /**
+     * Calculate IoU between two bounding boxes
+     * 计算两个边界框之间的IoU
+     */
+    calculateIoU(bbox1, bbox2) {
+        const [x1, y1, w1, h1] = bbox1;
+        const [x2, y2, w2, h2] = bbox2;
+        
+        const x1_max = x1 + w1;
+        const y1_max = y1 + h1;
+        const x2_max = x2 + w2;
+        const y2_max = y2 + h2;
+        
+        const intersect_x1 = Math.max(x1, x2);
+        const intersect_y1 = Math.max(y1, y2);
+        const intersect_x2 = Math.min(x1_max, x2_max);
+        const intersect_y2 = Math.min(y1_max, y2_max);
+        
+        if (intersect_x2 <= intersect_x1 || intersect_y2 <= intersect_y1) {
+            return 0;
+        }
+        
+        const intersect_area = (intersect_x2 - intersect_x1) * (intersect_y2 - intersect_y1);
+        const bbox1_area = w1 * h1;
+        const bbox2_area = w2 * h2;
+        const union_area = bbox1_area + bbox2_area - intersect_area;
+        
+        return intersect_area / union_area;
+    }
 }
 
-// Global detection manager instance
+// Global detection manager instance with previous frame storage
 window.detectionManager = new ObjectDetectionManager();
+window.detectionManager.previousDetections = []; // Store for temporal smoothing
 
 // Initialize detection manager when page loads
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log('Loading object detection model...');
+    console.log('Loading enhanced object detection model...');
     await window.detectionManager.loadModel();
 });

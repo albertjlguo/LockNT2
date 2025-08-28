@@ -141,14 +141,44 @@
       this.cy = bbox.y + bbox.h / 2;
       this.w = bbox.w; this.h = bbox.h;
       this.vx = 0; this.vy = 0;
-      this.alpha = opts.alpha ?? 0.6;
-      this.beta = opts.beta ?? 0.4;
+      this.alpha = opts.alpha ?? 0.7; // Increased for better responsiveness
+      this.beta = opts.beta ?? 0.3;   // Reduced for smoother velocity updates
       this.locked = !!opts.locked;
       this.color = COLOR_POOL[(id - 1) % COLOR_POOL.length];
       this.feature = null; // EMA feature
       this.lostFrames = 0;
       this.hits = 1;
       this.trajectory = [];
+      
+      // Enhanced tracking state for occlusion handling
+      // 增强的追踪状态用于遮挡处理
+      this.occlusionState = {
+        isOccluded: false,
+        occlusionStartFrame: 0,
+        lastKnownPosition: { cx: this.cx, cy: this.cy },
+        predictedPosition: { cx: this.cx, cy: this.cy },
+        confidence: 1.0,
+        searchRadius: Math.max(bbox.w, bbox.h) * 0.5
+      };
+      
+      // Motion model improvements
+      // 运动模型改进
+      this.motionModel = {
+        acceleration: { ax: 0, ay: 0 },
+        velocityHistory: [],
+        positionHistory: [],
+        maxHistory: 10
+      };
+      
+      // Appearance model enhancements
+      // 外观模型增强
+      this.appearanceModel = {
+        templates: [], // Multiple appearance templates
+        weights: [],   // Template weights
+        maxTemplates: 3,
+        updateThreshold: 0.8
+      };
+      
       this._pushTrajectory();
     }
 
@@ -159,47 +189,213 @@
       if (this.trajectory.length > 60) this.trajectory.shift();
     }
 
-    /** Constant-velocity alpha-beta prediction */
+    /** Enhanced prediction with motion model and occlusion handling */
     predict() {
-      const xp = this.cx + this.vx;
-      const yp = this.cy + this.vy;
-      // small damping to avoid runaway velocity
-      this.vx *= 0.98; this.vy *= 0.98;
-      this.cx = xp; this.cy = yp;
+      // Update motion history
+      // 更新运动历史
+      this.motionModel.positionHistory.push({ x: this.cx, y: this.cy, t: Date.now() });
+      this.motionModel.velocityHistory.push({ vx: this.vx, vy: this.vy, t: Date.now() });
+      
+      if (this.motionModel.positionHistory.length > this.motionModel.maxHistory) {
+        this.motionModel.positionHistory.shift();
+        this.motionModel.velocityHistory.shift();
+      }
+      
+      // Calculate acceleration from velocity history
+      // 从速度历史计算加速度
+      if (this.motionModel.velocityHistory.length >= 2) {
+        const recent = this.motionModel.velocityHistory.slice(-2);
+        const dt = (recent[1].t - recent[0].t) / 1000; // Convert to seconds
+        if (dt > 0) {
+          this.motionModel.acceleration.ax = (recent[1].vx - recent[0].vx) / dt;
+          this.motionModel.acceleration.ay = (recent[1].vy - recent[0].vy) / dt;
+        }
+      }
+      
+      // Enhanced prediction with acceleration
+      // 包含加速度的增强预测
+      const dt = 1/30; // Assume 30 FPS
+      let xp = this.cx + this.vx * dt + 0.5 * this.motionModel.acceleration.ax * dt * dt;
+      let yp = this.cy + this.vy * dt + 0.5 * this.motionModel.acceleration.ay * dt * dt;
+      
+      // Update velocity with acceleration
+      // 使用加速度更新速度
+      this.vx += this.motionModel.acceleration.ax * dt;
+      this.vy += this.motionModel.acceleration.ay * dt;
+      
+      // Apply damping to prevent runaway
+      // 应用阻尼防止失控
+      const dampingFactor = this.occlusionState.isOccluded ? 0.95 : 0.98;
+      this.vx *= dampingFactor;
+      this.vy *= dampingFactor;
+      
+      // Handle occlusion state
+      // 处理遮挡状态
+      if (this.occlusionState.isOccluded) {
+        // Expand search radius during occlusion
+        // 遮挡期间扩大搜索半径
+        this.occlusionState.searchRadius *= 1.05;
+        this.occlusionState.searchRadius = Math.min(this.occlusionState.searchRadius, 200);
+        
+        // Reduce confidence over time
+        // 随时间降低置信度
+        this.occlusionState.confidence *= 0.95;
+        
+        // Store predicted position
+        // 存储预测位置
+        this.occlusionState.predictedPosition = { cx: xp, cy: yp };
+      } else {
+        // Update last known position when not occluded
+        // 未遮挡时更新最后已知位置
+        this.occlusionState.lastKnownPosition = { cx: this.cx, cy: this.cy };
+        this.occlusionState.confidence = Math.min(1.0, this.occlusionState.confidence + 0.1);
+      }
+      
+      this.cx = xp;
+      this.cy = yp;
       this._pushTrajectory();
     }
 
-    /** Update with new detection bbox and optional appearance feature */
+    /** Enhanced update with occlusion recovery and appearance templates */
     update(detBbox, feature) {
       const zx = detBbox.x + detBbox.w / 2;
       const zy = detBbox.y + detBbox.h / 2;
+      
+      // Check if this is a recovery from occlusion
+      // 检查是否从遮挡中恢复
+      const wasOccluded = this.occlusionState.isOccluded;
+      
       // prediction step
       const xp = this.cx + this.vx;
       const yp = this.cy + this.vy;
-      // innovation
-      const rx = zx - xp; const ry = zy - yp;
-      // update
-      this.cx = xp + this.alpha * rx;
-      this.cy = yp + this.alpha * ry;
-      this.vx = this.vx + this.beta * rx;
-      this.vy = this.vy + this.beta * ry;
-      // smooth size with EMA
-      this.w = 0.7 * this.w + 0.3 * detBbox.w;
-      this.h = 0.7 * this.h + 0.3 * detBbox.h;
+      
+      // Calculate innovation (measurement residual)
+      // 计算新息（测量残差）
+      const rx = zx - xp; 
+      const ry = zy - yp;
+      const innovationMagnitude = Math.sqrt(rx * rx + ry * ry);
+      
+      // Adaptive update gains based on innovation and occlusion state
+      // 基于新息和遮挡状态的自适应更新增益
+      let adaptiveAlpha = this.alpha;
+      let adaptiveBeta = this.beta;
+      
+      if (wasOccluded) {
+        // Higher gains for quick recovery from occlusion
+        // 遮挡恢复时使用更高增益
+        adaptiveAlpha = Math.min(0.9, this.alpha * 1.5);
+        adaptiveBeta = Math.min(0.5, this.beta * 1.2);
+        
+        // Reset occlusion state
+        // 重置遮挡状态
+        this.occlusionState.isOccluded = false;
+        this.occlusionState.searchRadius = Math.max(detBbox.w, detBbox.h) * 0.5;
+      } else if (innovationMagnitude > 50) {
+        // Large innovation suggests rapid movement, increase responsiveness
+        // 大的新息表明快速运动，增加响应性
+        adaptiveAlpha = Math.min(0.8, this.alpha * 1.2);
+        adaptiveBeta = Math.min(0.4, this.beta * 1.1);
+      }
+      
+      // State update
+      // 状态更新
+      this.cx = xp + adaptiveAlpha * rx;
+      this.cy = yp + adaptiveAlpha * ry;
+      this.vx = this.vx + adaptiveBeta * rx;
+      this.vy = this.vy + adaptiveBeta * ry;
+      
+      // Adaptive size smoothing based on confidence
+      // 基于置信度的自适应尺寸平滑
+      const sizeWeight = Math.max(0.2, this.occlusionState.confidence * 0.4);
+      this.w = (1 - sizeWeight) * this.w + sizeWeight * detBbox.w;
+      this.h = (1 - sizeWeight) * this.h + sizeWeight * detBbox.h;
+      
       this.lostFrames = 0;
       this.hits += 1;
       this._pushTrajectory();
-      // EMA update for appearance
+      
+      // Enhanced appearance model with multiple templates
+      // 增强的外观模型，支持多个模板
       if (feature) {
-        if (!this.feature || this.feature.length !== feature.length) {
-          this.feature = feature;
-        } else {
-          const mu = 0.3;
-          for (let i = 0; i < this.feature.length; i++) {
-            this.feature[i] = (1 - mu) * this.feature[i] + mu * feature[i];
-          }
-          l2normalize(this.feature);
+        this.updateAppearanceModel(feature);
+      }
+    }
+    
+    /** Update appearance model with template management */
+    updateAppearanceModel(newFeature) {
+      if (!this.feature || this.feature.length !== newFeature.length) {
+        // Initialize first template
+        // 初始化第一个模板
+        this.feature = newFeature;
+        this.appearanceModel.templates = [newFeature];
+        this.appearanceModel.weights = [1.0];
+        return;
+      }
+      
+      // Calculate similarity with existing templates
+      // 计算与现有模板的相似度
+      const similarities = this.appearanceModel.templates.map(template => 
+        cosineSimilarity(newFeature, template)
+      );
+      
+      const maxSimilarity = Math.max(...similarities);
+      const bestTemplateIdx = similarities.indexOf(maxSimilarity);
+      
+      if (maxSimilarity > this.appearanceModel.updateThreshold) {
+        // Update existing template
+        // 更新现有模板
+        const mu = 0.2;
+        for (let i = 0; i < this.feature.length; i++) {
+          this.appearanceModel.templates[bestTemplateIdx][i] = 
+            (1 - mu) * this.appearanceModel.templates[bestTemplateIdx][i] + mu * newFeature[i];
         }
+        l2normalize(this.appearanceModel.templates[bestTemplateIdx]);
+        
+        // Update main feature to best template
+        // 将主特征更新为最佳模板
+        this.feature = this.appearanceModel.templates[bestTemplateIdx];
+      } else {
+        // Add new template if we have space
+        // 如果有空间则添加新模板
+        if (this.appearanceModel.templates.length < this.appearanceModel.maxTemplates) {
+          this.appearanceModel.templates.push(newFeature);
+          this.appearanceModel.weights.push(0.5);
+        } else {
+          // Replace least weighted template
+          // 替换权重最小的模板
+          const minWeightIdx = this.appearanceModel.weights.indexOf(
+            Math.min(...this.appearanceModel.weights)
+          );
+          this.appearanceModel.templates[minWeightIdx] = newFeature;
+          this.appearanceModel.weights[minWeightIdx] = 0.5;
+        }
+      }
+      
+      // Normalize weights
+      // 归一化权重
+      const totalWeight = this.appearanceModel.weights.reduce((sum, w) => sum + w, 0);
+      if (totalWeight > 0) {
+        this.appearanceModel.weights = this.appearanceModel.weights.map(w => w / totalWeight);
+      }
+    }
+    
+    /** Get best appearance match score with a feature */
+    getAppearanceMatchScore(feature) {
+      if (!feature || this.appearanceModel.templates.length === 0) return 0;
+      
+      const similarities = this.appearanceModel.templates.map((template, idx) => 
+        cosineSimilarity(feature, template) * this.appearanceModel.weights[idx]
+      );
+      
+      return Math.max(...similarities);
+    }
+    
+    /** Check if track should enter occlusion state */
+    checkOcclusionState(frameCount) {
+      if (this.lostFrames > 3 && !this.occlusionState.isOccluded) {
+        this.occlusionState.isOccluded = true;
+        this.occlusionState.occlusionStartFrame = frameCount;
+        this.occlusionState.searchRadius = Math.max(this.w, this.h) * 0.8;
       }
     }
   }
@@ -214,24 +410,59 @@
       this.focusClasses = opts.focusClasses || ['person'];
       this.detectHigh = opts.detectHigh ?? 0.5;
       this.detectLow = opts.detectLow ?? 0.3;
-      this.gatingBase = opts.gatingBase ?? 60; // px baseline for gating radius
-      this.maxLostUnlocked = opts.maxLostUnlocked ?? 45; // frames
-      this.maxLostLocked = opts.maxLostLocked ?? 150; // frames
-      // Matching weights
-      this.wIoU = opts.wIoU ?? 0.45;
-      this.wApp = opts.wApp ?? 0.45;
-      this.wCtr = opts.wCtr ?? 0.07;
-      this.wRatio = opts.wRatio ?? 0.03;
-      this.costThreshold = opts.costThreshold ?? 0.85;
+      this.gatingBase = opts.gatingBase ?? 80; // Increased for better occlusion handling
+      this.maxLostUnlocked = opts.maxLostUnlocked ?? 30; // Reduced for efficiency
+      this.maxLostLocked = opts.maxLostLocked ?? 120; // Increased for occlusion tolerance
+      
+      // Enhanced matching weights for better tracking
+      // 增强的匹配权重以改善追踪效果
+      this.wIoU = opts.wIoU ?? 0.35;        // Reduced IoU weight
+      this.wApp = opts.wApp ?? 0.40;        // Appearance weight
+      this.wCtr = opts.wCtr ?? 0.15;        // Increased center distance weight
+      this.wRatio = opts.wRatio ?? 0.05;    // Aspect ratio weight
+      this.wMotion = opts.wMotion ?? 0.05;  // New: motion consistency weight
+      
+      this.costThreshold = opts.costThreshold ?? 0.75; // Lowered for better matching
       this.autoCreate = !!opts.autoCreate; // default false: only create via click lock
+      
+      // Occlusion handling parameters
+      // 遮挡处理参数
+      this.occlusionParams = {
+        maxOcclusionFrames: 60,    // Max frames to maintain occluded track
+        reappearanceRadius: 150,   // Search radius for reappearance
+        confidenceDecay: 0.95,     // Confidence decay per frame during occlusion
+        minReappearanceScore: 0.6  // Min score to consider reappearance
+      };
+      
+      // Frame counter for occlusion management
+      // 用于遮挡管理的帧计数器
+      this.frameCount = 0;
     }
 
-    /** Predict-only step for frames without new detections */
+    /** Enhanced predict-only step with occlusion state management */
     predictOnly() {
+      this.frameCount++;
+      
       for (const t of this.tracks) {
         t.predict();
         t.lostFrames += 1;
+        
+        // Check and update occlusion state
+        // 检查并更新遮挡状态
+        t.checkOcclusionState(this.frameCount);
+        
+        // Handle long-term occlusion
+        // 处理长期遮挡
+        if (t.occlusionState.isOccluded) {
+          const occlusionDuration = this.frameCount - t.occlusionState.occlusionStartFrame;
+          if (occlusionDuration > this.occlusionParams.maxOcclusionFrames) {
+            // Mark for removal if occluded too long
+            // 如果遮挡时间过长则标记为删除
+            t.lostFrames = this.maxLostLocked + 1;
+          }
+        }
       }
+      
       this._prune();
     }
 
@@ -295,54 +526,90 @@
       this._prune();
     }
 
-    /** Internal: associate a set of tracks with detections using greedy min-cost */
+    /** Enhanced association with occlusion-aware matching */
     _associateAndUpdate(trackList, detections, unmatchedDetIdx, isLockedPass) {
       if (trackList.length === 0 || unmatchedDetIdx.size === 0) return;
 
-      // Precompute cost matrix
       const pairs = [];
       for (let ti = 0; ti < trackList.length; ti++) {
         const t = trackList[ti];
         const tb = t.bbox;
-        const gating = Math.max(this.gatingBase, 0.5 * Math.hypot(t.w, t.h));
+        
+        // Adaptive gating for occlusion handling
+        let gating = Math.max(this.gatingBase, 0.5 * Math.hypot(t.w, t.h));
+        if (t.occlusionState && t.occlusionState.isOccluded) {
+          gating = Math.max(gating, t.occlusionState.searchRadius || gating * 1.5);
+        }
+        
         for (const di of unmatchedDetIdx) {
           const d = detections[di];
           const db = { x: d.x, y: d.y, w: d.w, h: d.h };
           const i = iou(tb, db);
           const ctr = centerDistance(tb, db);
-          if (i < 0.01 && ctr > gating * 3) continue; // gate out far candidates
+          
+          const gatingMultiplier = (t.occlusionState && t.occlusionState.isOccluded) ? 2.5 : 2.0;
+          if (i < 0.01 && ctr > gating * gatingMultiplier) continue;
 
-          // appearance distance
+          // Enhanced appearance matching
           let app = 1;
-          if (this.enableReID && t.feature && d.feature) {
-            app = clamp(1 - cosineSimilarity(t.feature, d.feature), 0, 1);
-          } else if (this.enableReID && !t.feature && d.feature) {
-            // initialize track feature on first opportunity
-            t.feature = d.feature;
-            app = 0.5; // neutral distance
+          if (this.enableReID && d.feature) {
+            if (t.getAppearanceMatchScore && t.appearanceModel && t.appearanceModel.templates.length > 0) {
+              app = 1 - t.getAppearanceMatchScore(d.feature);
+            } else if (t.feature) {
+              app = clamp(1 - cosineSimilarity(t.feature, d.feature), 0, 1);
+            } else {
+              t.feature = d.feature;
+              app = 0.3;
+            }
           }
 
           const ratioT = (t.w / (t.h + 1e-3));
           const ratioD = (d.w / (d.h + 1e-3));
-          const ratioDiff = Math.min(1, Math.abs(ratioT - ratioD));
+          const ratioDiff = Math.min(1, Math.abs(ratioT - ratioD) / Math.max(ratioT, ratioD));
+          const ctrNorm = clamp(ctr / (gating * 1.5), 0, 1);
+          
+          // Motion consistency
+          const predictedX = t.cx + (t.vx || 0);
+          const predictedY = t.cy + (t.vy || 0);
+          const detCenterX = d.x + d.w / 2;
+          const detCenterY = d.y + d.h / 2;
+          const motionDist = Math.sqrt((predictedX - detCenterX) ** 2 + (predictedY - detCenterY) ** 2);
+          const motionCost = clamp(motionDist / gating, 0, 1);
 
-          const ctrNorm = clamp(ctr / (gating * 2), 0, 1);
+          // Adaptive weights
+          let wIoU = this.wIoU, wApp = this.wApp, wCtr = this.wCtr;
+          const wMotion = this.wMotion || 0.05;
+          
+          if (isLockedPass) {
+            wIoU = Math.max(0.25, this.wIoU - 0.1);
+            wApp = Math.min(0.5, this.wApp + 0.1);
+            wCtr = Math.min(0.2, this.wCtr + 0.05);
+          }
+          
+          if (t.occlusionState && t.occlusionState.isOccluded) {
+            wIoU *= 0.5; wApp *= 1.3; wCtr *= 1.2;
+          }
 
-          // Adjust weights if locked
-          const wIoU = isLockedPass ? Math.max(0.35, this.wIoU - 0.1) : this.wIoU;
-          const wApp = isLockedPass ? Math.min(0.6, this.wApp + 0.15) : this.wApp;
-
-          const cost = wIoU * (1 - i) + wApp * app + this.wCtr * ctrNorm + this.wRatio * ratioDiff;
+          const cost = wIoU * (1 - i) + wApp * app + wCtr * ctrNorm + 
+                      (this.wRatio || 0.03) * ratioDiff + wMotion * motionCost;
+          
           pairs.push({ cost, ti, di });
         }
       }
 
-      // Greedy assignment by increasing cost
       pairs.sort((a, b) => a.cost - b.cost);
       const usedT = new Set();
+      
       for (const p of pairs) {
-        if (p.cost > this.costThreshold) break;
+        let threshold = this.costThreshold;
+        const track = trackList[p.ti];
+        
+        if (track.occlusionState && track.occlusionState.isOccluded) threshold *= 1.2;
+        if (track.locked) threshold *= 1.1;
+        
+        if (p.cost > threshold) break;
         if (usedT.has(p.ti) || !unmatchedDetIdx.has(p.di)) continue;
+        
         const t = trackList[p.ti];
         const d = detections[p.di];
         t.update({ x: d.x, y: d.y, w: d.w, h: d.h }, d.feature);

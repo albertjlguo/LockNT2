@@ -139,6 +139,35 @@
                                 </div>
                             </div>
 
+                            <!-- Detection Settings -->
+                            <div class="detection-settings mb-4">
+                                <h6 class="text-muted mb-3">
+                                    <i class="fas fa-sliders-h me-2"></i>Detection Settings
+                                </h6>
+                                
+                                <!-- Person Confidence Threshold -->
+                                <div class="mb-3">
+                                    <label for="personConfidence" class="form-label d-flex justify-content-between">
+                                        <span><i class="fas fa-user me-1"></i>Person Confidence</span>
+                                        <span class="badge bg-primary" id="personConfidenceValue">50%</span>
+                                    </label>
+                                    <input type="range" class="form-range" id="personConfidence" 
+                                           min="10" max="90" value="50" step="5">
+                                    <div class="form-text">Minimum confidence for detecting persons</div>
+                                </div>
+                                
+                                <!-- Car Confidence Threshold -->
+                                <div class="mb-3">
+                                    <label for="carConfidence" class="form-label d-flex justify-content-between">
+                                        <span><i class="fas fa-car me-1"></i>Car Confidence</span>
+                                        <span class="badge bg-success" id="carConfidenceValue">50%</span>
+                                    </label>
+                                    <input type="range" class="form-range" id="carConfidence" 
+                                           min="10" max="90" value="50" step="5">
+                                    <div class="form-text">Minimum confidence for detecting cars</div>
+                                </div>
+                            </div>
+
                             <!-- Object Tracking -->
                             <div class="tracking-list mt-3">
                                 <h6 class="text-muted mb-3">Object Tracking</h6>
