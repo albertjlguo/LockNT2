@@ -29,6 +29,16 @@ class ObjectDetectionManager {
         this.detectionBuffer = [];
         this.maxBufferSize = 3; // Keep last 3 frames for fusion
         
+        // Occlusion and partial visibility handling
+        // 遮挡和部分可见性处理
+        this.occlusionHandler = {
+            partialDetections: [], // Store partial/edge detections
+            boundaryThreshold: 0.15, // 15% of object can be outside screen
+            minVisibleRatio: 0.3, // Minimum 30% of object must be visible
+            edgeExpansionFactor: 1.5, // Expand search near edges
+            confidenceBoost: 0.1 // Boost confidence for edge detections
+        };
+        
         this.initializeConfidenceControls();
     }
 
@@ -154,9 +164,13 @@ class ObjectDetectionManager {
             // 应用多帧检测融合以提高准确性
             const fusedDetections = this.applyMultiFrameFusion(nmsFiltered);
             
+            // Handle partial visibility and occlusion cases
+            // 处理部分可见性和遮挡情况
+            const occlusionEnhanced = this.handlePartialVisibility(fusedDetections, videoElement);
+            
             // Apply temporal smoothing to reduce jitter
             // 应用时间平滑以减少抖动
-            const smoothedPredictions = this.applyTemporalSmoothing(fusedDetections, this.previousDetections);
+            const smoothedPredictions = this.applyTemporalSmoothing(occlusionEnhanced, this.previousDetections);
             
             // Store for next frame smoothing
             // 存储用于下一帧平滑
@@ -908,6 +922,265 @@ class ObjectDetectionManager {
                 stability: detections.length / this.maxBufferSize
             }
         };
+    }
+    
+    /**
+     * Handle partial visibility and occlusion cases for better detection continuity
+     * 处理部分可见性和遮挡情况以提高检测连续性
+     */
+    handlePartialVisibility(detections, videoElement) {
+        const imageWidth = videoElement.naturalWidth || videoElement.width || 640;
+        const imageHeight = videoElement.naturalHeight || videoElement.height || 480;
+        
+        const enhancedDetections = [...detections];
+        
+        // Analyze each detection for partial visibility
+        // 分析每个检测的部分可见性
+        detections.forEach(detection => {
+            const [x, y, w, h] = detection.bbox;
+            const edgeInfo = this.analyzeEdgeProximity(x, y, w, h, imageWidth, imageHeight);
+            
+            if (edgeInfo.isNearEdge) {
+                // Enhance detection for edge cases
+                // 增强边缘情况的检测
+                this.enhanceEdgeDetection(detection, edgeInfo, imageWidth, imageHeight);
+            }
+        });
+        
+        // Try to recover partially occluded objects from previous frames
+        // 尝试从先前帧恢复部分遮挡的目标
+        const recoveredDetections = this.recoverPartiallyOccludedObjects(enhancedDetections, imageWidth, imageHeight);
+        
+        // Merge recovered detections with current ones
+        // 将恢复的检测与当前检测合并
+        return this.mergeDetections(enhancedDetections, recoveredDetections);
+    }
+    
+    /**
+     * Analyze proximity to image edges for partial visibility detection
+     * 分析与图像边缘的接近程度以检测部分可见性
+     */
+    analyzeEdgeProximity(x, y, w, h, imageWidth, imageHeight) {
+        const threshold = this.occlusionHandler.boundaryThreshold;
+        const edgeThreshold = Math.min(imageWidth, imageHeight) * threshold;
+        
+        const edgeInfo = {
+            isNearEdge: false,
+            edges: [],
+            visibilityRatio: 1.0,
+            truncationInfo: {}
+        };
+        
+        // Check each edge
+        // 检查每个边缘
+        if (x < edgeThreshold) {
+            edgeInfo.isNearEdge = true;
+            edgeInfo.edges.push('left');
+            edgeInfo.truncationInfo.left = Math.max(0, -x);
+        }
+        if (y < edgeThreshold) {
+            edgeInfo.isNearEdge = true;
+            edgeInfo.edges.push('top');
+            edgeInfo.truncationInfo.top = Math.max(0, -y);
+        }
+        if (x + w > imageWidth - edgeThreshold) {
+            edgeInfo.isNearEdge = true;
+            edgeInfo.edges.push('right');
+            edgeInfo.truncationInfo.right = Math.max(0, (x + w) - imageWidth);
+        }
+        if (y + h > imageHeight - edgeThreshold) {
+            edgeInfo.isNearEdge = true;
+            edgeInfo.edges.push('bottom');
+            edgeInfo.truncationInfo.bottom = Math.max(0, (y + h) - imageHeight);
+        }
+        
+        // Calculate visible area ratio
+        // 计算可见区域比例
+        const visibleX = Math.max(0, x);
+        const visibleY = Math.max(0, y);
+        const visibleW = Math.min(w, imageWidth - visibleX);
+        const visibleH = Math.min(h, imageHeight - visibleY);
+        const visibleArea = Math.max(0, visibleW * visibleH);
+        const totalArea = w * h;
+        
+        edgeInfo.visibilityRatio = totalArea > 0 ? visibleArea / totalArea : 0;
+        
+        return edgeInfo;
+    }
+    
+    /**
+     * Enhance detection for objects near edges with extrapolation
+     * 通过外推增强边缘附近目标的检测
+     */
+    enhanceEdgeDetection(detection, edgeInfo, imageWidth, imageHeight) {
+        const [x, y, w, h] = detection.bbox;
+        
+        // Boost confidence for edge detections if visibility is sufficient
+        // 如果可见性足够，提升边缘检测的置信度
+        if (edgeInfo.visibilityRatio >= this.occlusionHandler.minVisibleRatio) {
+            detection.score = Math.min(1.0, detection.score + this.occlusionHandler.confidenceBoost);
+            
+            // Add metadata for tracking system
+            // 为追踪系统添加元数据
+            detection.edgeInfo = {
+                isPartiallyVisible: true,
+                visibilityRatio: edgeInfo.visibilityRatio,
+                nearEdges: edgeInfo.edges,
+                estimatedFullBbox: this.estimateFullBoundingBox(detection, edgeInfo, imageWidth, imageHeight)
+            };
+        }
+    }
+    
+    /**
+     * Estimate full bounding box for partially visible objects
+     * 估计部分可见目标的完整边界框
+     */
+    estimateFullBoundingBox(detection, edgeInfo, imageWidth, imageHeight) {
+        const [x, y, w, h] = detection.bbox;
+        let estimatedX = x, estimatedY = y, estimatedW = w, estimatedH = h;
+        
+        // Use class-specific aspect ratios for extrapolation
+        // 使用类别特定的宽高比进行外推
+        const expectedAspectRatios = {
+            'person': { min: 0.3, max: 0.8, typical: 0.5 }, // Height > Width for persons
+            'car': { min: 1.5, max: 3.0, typical: 2.2 }     // Width > Height for cars
+        };
+        
+        const aspectRatio = expectedAspectRatios[detection.class];
+        
+        if (aspectRatio) {
+            // Extrapolate based on visible portion and expected aspect ratio
+            // 基于可见部分和预期宽高比进行外推
+            if (edgeInfo.edges.includes('left') || edgeInfo.edges.includes('right')) {
+                // Horizontal truncation - estimate full width
+                // 水平截断 - 估计完整宽度
+                if (detection.class === 'person') {
+                    estimatedH = h; // Keep height
+                    estimatedW = estimatedH * aspectRatio.typical;
+                    estimatedX = edgeInfo.edges.includes('left') ? 
+                        Math.max(0, x - (estimatedW - w)) : x;
+                } else if (detection.class === 'car') {
+                    estimatedH = h; // Keep height
+                    estimatedW = estimatedH * aspectRatio.typical;
+                    estimatedX = edgeInfo.edges.includes('left') ? 
+                        Math.max(0, x - (estimatedW - w)) : x;
+                }
+            }
+            
+            if (edgeInfo.edges.includes('top') || edgeInfo.edges.includes('bottom')) {
+                // Vertical truncation - estimate full height
+                // 垂直截断 - 估计完整高度
+                if (detection.class === 'person') {
+                    estimatedW = w; // Keep width
+                    estimatedH = estimatedW / aspectRatio.typical;
+                    estimatedY = edgeInfo.edges.includes('top') ? 
+                        Math.max(0, y - (estimatedH - h)) : y;
+                } else if (detection.class === 'car') {
+                    estimatedW = w; // Keep width
+                    estimatedH = estimatedW / aspectRatio.typical;
+                    estimatedY = edgeInfo.edges.includes('top') ? 
+                        Math.max(0, y - (estimatedH - h)) : y;
+                }
+            }
+        }
+        
+        return [estimatedX, estimatedY, estimatedW, estimatedH];
+    }
+    
+    /**
+     * Recover partially occluded objects using motion prediction and history
+     * 使用运动预测和历史记录恢复部分遮挡的目标
+     */
+    recoverPartiallyOccludedObjects(currentDetections, imageWidth, imageHeight) {
+        const recoveredDetections = [];
+        
+        // Look for missing objects that might be partially occluded
+        // 寻找可能部分遮挡的缺失目标
+        if (this.previousDetections && this.previousDetections.length > 0) {
+            this.previousDetections.forEach(prevDet => {
+                // Check if this object is missing in current frame
+                // 检查此目标是否在当前帧中缺失
+                const hasMatch = currentDetections.some(currDet => {
+                    const iou = this.calculateIoU(prevDet.bbox, currDet.bbox);
+                    return iou > 0.3 && currDet.class === prevDet.class;
+                });
+                
+                if (!hasMatch && prevDet.edgeInfo?.isPartiallyVisible) {
+                    // Try to predict where this object might be now
+                    // 尝试预测此目标现在可能的位置
+                    const predictedDetection = this.predictOccludedObjectPosition(prevDet, imageWidth, imageHeight);
+                    
+                    if (predictedDetection) {
+                        recoveredDetections.push(predictedDetection);
+                    }
+                }
+            });
+        }
+        
+        return recoveredDetections;
+    }
+    
+    /**
+     * Predict position of occluded object based on motion history
+     * 基于运动历史预测遮挡目标的位置
+     */
+    predictOccludedObjectPosition(previousDetection, imageWidth, imageHeight) {
+        // Simple motion prediction - can be enhanced with Kalman filter
+        // 简单运动预测 - 可以用卡尔曼滤波器增强
+        const [prevX, prevY, prevW, prevH] = previousDetection.bbox;
+        
+        // Estimate velocity from trajectory if available
+        // 如果可用，从轨迹估计速度
+        let vx = 0, vy = 0;
+        if (previousDetection.motionHistory && previousDetection.motionHistory.length >= 2) {
+            const recent = previousDetection.motionHistory.slice(-2);
+            vx = recent[1].x - recent[0].x;
+            vy = recent[1].y - recent[0].y;
+        }
+        
+        // Predict new position
+        // 预测新位置
+        const predictedX = prevX + vx;
+        const predictedY = prevY + vy;
+        
+        // Check if predicted position is still partially visible
+        // 检查预测位置是否仍然部分可见
+        const edgeInfo = this.analyzeEdgeProximity(predictedX, predictedY, prevW, prevH, imageWidth, imageHeight);
+        
+        if (edgeInfo.visibilityRatio >= this.occlusionHandler.minVisibleRatio) {
+            return {
+                ...previousDetection,
+                bbox: [predictedX, predictedY, prevW, prevH],
+                score: previousDetection.score * 0.7, // Reduce confidence for predicted
+                isPredicted: true,
+                edgeInfo: edgeInfo
+            };
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Merge current and recovered detections, avoiding duplicates
+     * 合并当前和恢复的检测，避免重复
+     */
+    mergeDetections(currentDetections, recoveredDetections) {
+        const merged = [...currentDetections];
+        
+        recoveredDetections.forEach(recovered => {
+            // Check if this recovered detection conflicts with current ones
+            // 检查此恢复的检测是否与当前检测冲突
+            const hasConflict = currentDetections.some(current => {
+                const iou = this.calculateIoU(recovered.bbox, current.bbox);
+                return iou > 0.3 && current.class === recovered.class;
+            });
+            
+            if (!hasConflict) {
+                merged.push(recovered);
+            }
+        });
+        
+        return merged;
     }
 }
 

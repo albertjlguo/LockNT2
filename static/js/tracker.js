@@ -848,10 +848,15 @@
         // 检查并更新遮挡状态
         t.checkOcclusionState(this.frameCount);
         
-        // Handle long-term occlusion
-        // 处理长期遮挡
+        // Enhanced occlusion handling with edge prediction
+        // 增强的遮挡处理，包含边缘预测
         if (t.occlusionState.isOccluded) {
           const occlusionDuration = this.frameCount - t.occlusionState.occlusionStartFrame;
+          
+          // Try to predict if object might reappear at screen edges
+          // 尝试预测目标是否可能在屏幕边缘重新出现
+          this._predictEdgeReappearance(t);
+          
           if (occlusionDuration > this.occlusionParams.maxOcclusionFrames) {
             // Mark for removal if occluded too long
             // 如果遮挡时间过长则标记为删除
@@ -930,6 +935,10 @@
       // Try to recover lost tracks before creating new ones
       // 在创建新轨迹前尝试恢复丢失的轨迹
       this._attemptTrackRecovery(enriched, unmatchedDetIdx);
+      
+      // Handle partial visibility detections from enhanced detection system
+      // 处理来自增强检测系统的部分可见性检测
+      this._handlePartialVisibilityDetections(enriched, unmatchedDetIdx);
 
       // Optionally create new tracks from remaining detections (if enabled)
       if (this.autoCreate) {
@@ -1826,6 +1835,187 @@
       if (idx < 0) return false;
       if (remove) { this.tracks.splice(idx, 1); return true; }
       this.tracks[idx].locked = false; return true;
+    }
+
+    /**
+     * Predict edge reappearance for occluded tracks
+     * 为遮挡轨迹预测边缘重新出现
+     */
+    _predictEdgeReappearance(track) {
+      // Calculate predicted position based on velocity
+      // 基于速度计算预测位置
+      const dt = 1/30; // Assume 30 FPS
+      const predictedX = track.cx + (track.vx || 0) * dt * 5; // Look ahead 5 frames
+      const predictedY = track.cy + (track.vy || 0) * dt * 5;
+      
+      // Store prediction for potential edge detection matching
+      // 存储预测以用于潜在的边缘检测匹配
+      track.occlusionState.predictedPosition = {
+        cx: predictedX,
+        cy: predictedY
+      };
+      
+      // Expand search radius if moving towards edges
+      // 如果向边缘移动则扩大搜索半径
+      const velocityMagnitude = Math.sqrt((track.vx || 0)**2 + (track.vy || 0)**2);
+      if (velocityMagnitude > 10) {
+        track.occlusionState.searchRadius = Math.min(200, 
+          track.occlusionState.searchRadius * 1.1);
+      }
+    }
+    
+    /**
+     * Handle partial visibility detections from enhanced detection system
+     * 处理来自增强检测系统的部分可见性检测
+     */
+    _handlePartialVisibilityDetections(detections, unmatchedDetIdx) {
+      // Look for detections marked as partially visible or predicted
+      // 寻找标记为部分可见或预测的检测
+      const partialDetections = [];
+      
+      for (const idx of unmatchedDetIdx) {
+        const det = detections[idx];
+        if (det.edgeInfo?.isPartiallyVisible || det.isPredicted) {
+          partialDetections.push({ detection: det, index: idx });
+        }
+      }
+      
+      if (partialDetections.length === 0) return;
+      
+      // Try to match partial detections with occluded tracks
+      // 尝试将部分检测与遮挡轨迹匹配
+      const occludedTracks = this.tracks.filter(t => 
+        t.occlusionState.isOccluded || t.lostFrames > 2
+      );
+      
+      for (const { detection: det, index: detIdx } of partialDetections) {
+        let bestMatch = null;
+        let bestScore = 0;
+        
+        for (const track of occludedTracks) {
+          if (track._updatedThisRound) continue;
+          
+          // Calculate matching score for partial detection
+          // 计算部分检测的匹配分数
+          const score = this._calculatePartialMatchScore(track, det);
+          
+          if (score > bestScore && score > 0.4) {
+            bestScore = score;
+            bestMatch = track;
+          }
+        }
+        
+        if (bestMatch) {
+          // Update track with partial detection
+          // 使用部分检测更新轨迹
+          this._updateTrackWithPartialDetection(bestMatch, det);
+          bestMatch._updatedThisRound = true;
+          unmatchedDetIdx.delete(detIdx);
+        }
+      }
+    }
+    
+    /**
+     * Calculate matching score for partial detection and occluded track
+     * 计算部分检测和遮挡轨迹的匹配分数
+     */
+    _calculatePartialMatchScore(track, detection) {
+      const det = detection;
+      const detCx = det.x + det.w / 2;
+      const detCy = det.y + det.h / 2;
+      
+      // Use predicted position if available
+      // 如果可用，使用预测位置
+      const trackPos = track.occlusionState.predictedPosition || 
+                      { cx: track.cx, cy: track.cy };
+      
+      // Distance score
+      // 距离分数
+      const distance = Math.sqrt((trackPos.cx - detCx)**2 + (trackPos.cy - detCy)**2);
+      const maxDistance = track.occlusionState.searchRadius || 100;
+      const distanceScore = Math.max(0, 1 - distance / maxDistance);
+      
+      // Class consistency
+      // 类别一致性
+      let classScore = 0.5; // Default neutral
+      if (track.class && det.class) {
+        classScore = track.class === det.class ? 1.0 : 0.0;
+      }
+      
+      // Appearance score (if available)
+      // 外观分数（如果可用）
+      let appearanceScore = 0.5; // Default neutral
+      if (det.feature && track.getAppearanceMatchScore) {
+        appearanceScore = track.getAppearanceMatchScore(det.feature);
+      }
+      
+      // Size consistency (more lenient for partial detections)
+      // 尺寸一致性（对部分检测更宽松）
+      const sizeRatio = Math.min(det.w/track.w, track.w/det.w) * 
+                       Math.min(det.h/track.h, track.h/det.h);
+      const sizeScore = Math.max(0.3, sizeRatio); // More lenient minimum
+      
+      // Edge detection bonus
+      // 边缘检测奖励
+      let edgeBonus = 0;
+      if (det.edgeInfo?.isPartiallyVisible) {
+        edgeBonus = 0.1 * det.edgeInfo.visibilityRatio;
+      }
+      
+      // Combine scores with weights favoring appearance and class consistency
+      // 结合分数，偏重外观和类别一致性
+      const finalScore = 0.25 * distanceScore + 
+                        0.35 * appearanceScore + 
+                        0.25 * classScore + 
+                        0.15 * sizeScore + 
+                        edgeBonus;
+      
+      return finalScore;
+    }
+    
+    /**
+     * Update track with partial detection information
+     * 使用部分检测信息更新轨迹
+     */
+    _updateTrackWithPartialDetection(track, detection) {
+      const det = detection;
+      
+      // Create bbox object for update
+      // 创建用于更新的边界框对象
+      const detBbox = { x: det.x, y: det.y, w: det.w, h: det.h };
+      
+      // Use estimated full bbox if available
+      // 如果可用，使用估计的完整边界框
+      if (det.edgeInfo?.estimatedFullBbox) {
+        const [ex, ey, ew, eh] = det.edgeInfo.estimatedFullBbox;
+        detBbox.x = ex;
+        detBbox.y = ey;
+        detBbox.w = ew;
+        detBbox.h = eh;
+      }
+      
+      // Reduced confidence update for partial detections
+      // 对部分检测使用降低的置信度更新
+      const confidence = det.isPredicted ? 0.5 : 
+                        (det.edgeInfo?.visibilityRatio || 0.7);
+      
+      // Update track with special handling for partial visibility
+      // 使用部分可见性的特殊处理更新轨迹
+      track.update(detBbox, det.feature);
+      
+      // Reset occlusion state if successfully matched
+      // 如果成功匹配则重置遮挡状态
+      if (track.occlusionState.isOccluded) {
+        track.occlusionState.isOccluded = false;
+        track.occlusionState.confidence = Math.min(1.0, 
+          track.occlusionState.confidence + 0.2);
+      }
+      
+      // Store edge information for future reference
+      // 存储边缘信息以供将来参考
+      if (det.edgeInfo) {
+        track.edgeInfo = det.edgeInfo;
+      }
     }
 
     /** Clear all tracks and reset ID manager */
