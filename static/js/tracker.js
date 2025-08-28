@@ -74,6 +74,117 @@
     return { h, s, v };
   }
 
+  /** Convert RGB to LAB color space for better perceptual distance */
+  function rgbToLab(r, g, b) {
+    // Convert RGB to XYZ
+    r /= 255; g /= 255; b /= 255;
+    r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+    g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+    b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+    
+    let x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047;
+    let y = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 1.00000;
+    let z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883;
+    
+    // Convert XYZ to LAB
+    x = x > 0.008856 ? Math.pow(x, 1/3) : (7.787 * x + 16/116);
+    y = y > 0.008856 ? Math.pow(y, 1/3) : (7.787 * y + 16/116);
+    z = z > 0.008856 ? Math.pow(z, 1/3) : (7.787 * z + 16/116);
+    
+    return {
+      l: (116 * y) - 16,
+      a: 500 * (x - y),
+      b: 200 * (y - z)
+    };
+  }
+
+  /** Calculate perceptual color distance using Delta E CIE76 */
+  function deltaE(lab1, lab2) {
+    const dl = lab1.l - lab2.l;
+    const da = lab1.a - lab2.a;
+    const db = lab1.b - lab2.b;
+    return Math.sqrt(dl*dl + da*da + db*db);
+  }
+
+  /** Extract dominant colors using k-means clustering */
+  function extractDominantColors(imageData, k = 5) {
+    const pixels = [];
+    const data = imageData.data;
+    
+    // Sample pixels (every 4th pixel to reduce computation)
+    for (let i = 0; i < data.length; i += 16) {
+      pixels.push([data[i], data[i+1], data[i+2]]);
+    }
+    
+    if (pixels.length === 0) return [];
+    
+    // Simple k-means clustering
+    let centroids = [];
+    for (let i = 0; i < k; i++) {
+      const idx = Math.floor(Math.random() * pixels.length);
+      centroids.push([...pixels[idx]]);
+    }
+    
+    // Iterate to find centroids
+    for (let iter = 0; iter < 10; iter++) {
+      const clusters = Array(k).fill().map(() => []);
+      
+      // Assign pixels to nearest centroid
+      for (const pixel of pixels) {
+        let minDist = Infinity;
+        let bestCluster = 0;
+        
+        for (let c = 0; c < k; c++) {
+          const dist = Math.sqrt(
+            Math.pow(pixel[0] - centroids[c][0], 2) +
+            Math.pow(pixel[1] - centroids[c][1], 2) +
+            Math.pow(pixel[2] - centroids[c][2], 2)
+          );
+          if (dist < minDist) {
+            minDist = dist;
+            bestCluster = c;
+          }
+        }
+        clusters[bestCluster].push(pixel);
+      }
+      
+      // Update centroids
+      for (let c = 0; c < k; c++) {
+        if (clusters[c].length > 0) {
+          centroids[c] = [
+            clusters[c].reduce((sum, p) => sum + p[0], 0) / clusters[c].length,
+            clusters[c].reduce((sum, p) => sum + p[1], 0) / clusters[c].length,
+            clusters[c].reduce((sum, p) => sum + p[2], 0) / clusters[c].length
+          ];
+        }
+      }
+    }
+    
+    // Return dominant colors with their weights
+    const result = [];
+    for (let c = 0; c < k; c++) {
+      const cluster = [];
+      for (const pixel of pixels) {
+        const dist = Math.sqrt(
+          Math.pow(pixel[0] - centroids[c][0], 2) +
+          Math.pow(pixel[1] - centroids[c][1], 2) +
+          Math.pow(pixel[2] - centroids[c][2], 2)
+        );
+        if (dist < 50) cluster.push(pixel); // Threshold for assignment
+      }
+      
+      if (cluster.length > 0) {
+        result.push({
+          color: centroids[c],
+          weight: cluster.length / pixels.length,
+          lab: rgbToLab(centroids[c][0], centroids[c][1], centroids[c][2])
+        });
+      }
+    }
+    
+    return result.sort((a, b) => b.weight - a.weight);
+  }
+
   // ----------------------- Kalman Filter --------------------------
   /**
    * Kalman Filter for object tracking
@@ -442,7 +553,13 @@
       if (!colorFeature) return null;
 
       const geometricFeature = this._extractGeometricFeatures(bbox);
-      return { color: colorFeature, geometric: geometricFeature };
+      const enhancedFeatures = await this._extractEnhancedFeatures(ctx, bbox);
+      
+      return { 
+        color: colorFeature, 
+        geometric: geometricFeature,
+        enhanced: enhancedFeatures
+      };
     }
 
     _extractGeometricFeatures(bbox) {
@@ -451,9 +568,27 @@
       const normalizedArea = (w * h) / (this.imageWidth * this.imageHeight);
       const normalizedX = (x + w / 2) / this.imageWidth;
       const normalizedY = (y + h / 2) / this.imageHeight;
-
-      // Feature vector: [aspectRatio, normalizedArea, confidence, normalizedX, normalizedY]
-      return [aspectRatio, normalizedArea, confidence || 0.5, normalizedX, normalizedY];
+      
+      // Enhanced geometric features
+      const geometricCentroid = this._calculateGeometricCentroid(bbox);
+      const shapeCompactness = (4 * Math.PI * w * h) / Math.pow(2 * (w + h), 2);
+      const diagonalRatio = Math.sqrt(w*w + h*h) / Math.max(w, h);
+      
+      // Feature vector: [aspectRatio, normalizedArea, confidence, normalizedX, normalizedY, 
+      //                  centroidX, centroidY, compactness, diagonalRatio]
+      return [
+        aspectRatio, normalizedArea, confidence || 0.5, normalizedX, normalizedY,
+        geometricCentroid.x, geometricCentroid.y, shapeCompactness, diagonalRatio
+      ];
+    }
+    
+    _calculateGeometricCentroid(bbox) {
+      // For rectangular bounding box, geometric centroid is simply the center
+      // In future, this could be enhanced with actual shape analysis
+      return {
+        x: (bbox.x + bbox.w / 2) / this.imageWidth,
+        y: (bbox.y + bbox.h / 2) / this.imageHeight
+      };
     }
 
     /** Extracts color histogram feature */
@@ -493,6 +628,160 @@
       }
 
       return l2normalize(hist);
+    }
+    
+    /** Extract enhanced features including color centroid and overall color characteristics */
+    async _extractEnhancedFeatures(ctx, bbox) {
+      const x = bbox.x + (1 - this.innerCrop) * 0.5 * bbox.w;
+      const y = bbox.y + (1 - this.innerCrop) * 0.5 * bbox.h;
+      const w = bbox.w * this.innerCrop;
+      const h = bbox.h * this.innerCrop;
+
+      const ix = Math.round(x), iy = Math.round(y);
+      const iw = Math.max(1, Math.round(w)), ih = Math.max(1, Math.round(h));
+      if (iw < 6 || ih < 6) return null;
+
+      let img;
+      try { img = ctx.getImageData(ix, iy, iw, ih); }
+      catch (e) { return null; }
+
+      const data = img.data;
+      const step = Math.max(1, this.sampleStep);
+      
+      // Extract dominant colors
+      const dominantColors = extractDominantColors(img, 3);
+      
+      // Calculate color centroid (weighted center based on color intensity)
+      let colorCentroid = this._calculateColorCentroid(data, iw, ih, step);
+      
+      // Calculate overall color statistics
+      const colorStats = this._calculateColorStatistics(data, step);
+      
+      // Calculate color distribution entropy
+      const colorEntropy = this._calculateColorEntropy(data, step);
+      
+      return {
+        dominantColors: dominantColors,
+        colorCentroid: colorCentroid,
+        colorStatistics: colorStats,
+        colorEntropy: colorEntropy,
+        overallBrightness: colorStats.avgBrightness,
+        colorVariance: colorStats.variance
+      };
+    }
+    
+    /** Calculate color centroid - weighted center based on color intensity and distribution */
+    _calculateColorCentroid(data, width, height, step) {
+      let totalWeight = 0;
+      let weightedX = 0;
+      let weightedY = 0;
+      
+      for (let y = 0; y < height; y += step) {
+        for (let x = 0; x < width; x += step) {
+          const p = (y * width + x) * 4;
+          const r = data[p], g = data[p + 1], b = data[p + 2];
+          
+          // Use luminance as weight (perceived brightness)
+          const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+          
+          // Also consider color saturation for weight
+          const { s: saturation } = rgbToHsv(r, g, b);
+          const weight = luminance * (1 + saturation); // Bright and saturated pixels have more weight
+          
+          weightedX += x * weight;
+          weightedY += y * weight;
+          totalWeight += weight;
+        }
+      }
+      
+      if (totalWeight === 0) {
+        return { x: 0.5, y: 0.5 }; // Default to center if no weight
+      }
+      
+      return {
+        x: (weightedX / totalWeight) / width,  // Normalized to [0,1]
+        y: (weightedY / totalWeight) / height  // Normalized to [0,1]
+      };
+    }
+    
+    /** Calculate overall color statistics */
+    _calculateColorStatistics(data, step) {
+      let totalR = 0, totalG = 0, totalB = 0;
+      let totalBrightness = 0;
+      let totalSaturation = 0;
+      let count = 0;
+      
+      const values = [];
+      
+      for (let i = 0; i < data.length; i += 4 * step) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const brightness = (r + g + b) / 3;
+        const { s: saturation } = rgbToHsv(r, g, b);
+        
+        totalR += r;
+        totalG += g;
+        totalB += b;
+        totalBrightness += brightness;
+        totalSaturation += saturation;
+        values.push(brightness);
+        count++;
+      }
+      
+      if (count === 0) {
+        return {
+          avgR: 0, avgG: 0, avgB: 0,
+          avgBrightness: 0, avgSaturation: 0,
+          variance: 0
+        };
+      }
+      
+      const avgBrightness = totalBrightness / count;
+      
+      // Calculate variance
+      let variance = 0;
+      for (const val of values) {
+        variance += Math.pow(val - avgBrightness, 2);
+      }
+      variance /= count;
+      
+      return {
+        avgR: totalR / count,
+        avgG: totalG / count,
+        avgB: totalB / count,
+        avgBrightness: avgBrightness,
+        avgSaturation: totalSaturation / count,
+        variance: variance
+      };
+    }
+    
+    /** Calculate color entropy to measure color diversity */
+    _calculateColorEntropy(data, step) {
+      const colorBins = new Map();
+      let totalPixels = 0;
+      
+      // Quantize colors to reduce bins (8 levels per channel = 512 total colors)
+      for (let i = 0; i < data.length; i += 4 * step) {
+        const r = Math.floor(data[i] / 32) * 32;     // 8 levels
+        const g = Math.floor(data[i + 1] / 32) * 32; // 8 levels  
+        const b = Math.floor(data[i + 2] / 32) * 32; // 8 levels
+        const colorKey = `${r},${g},${b}`;
+        
+        colorBins.set(colorKey, (colorBins.get(colorKey) || 0) + 1);
+        totalPixels++;
+      }
+      
+      if (totalPixels === 0) return 0;
+      
+      // Calculate entropy: -Σ(p * log2(p))
+      let entropy = 0;
+      for (const count of colorBins.values()) {
+        const probability = count / totalPixels;
+        if (probability > 0) {
+          entropy -= probability * Math.log2(probability);
+        }
+      }
+      
+      return entropy;
     }
 
     /** Compute appearance distance in [0,1] (1 - cosine similarity) */
@@ -626,7 +915,7 @@
       }
     }
     
-    /** Update appearance model with EMA */
+    /** Update appearance model with EMA including enhanced features */
     updateAppearanceModel(newFeature) {
       const alpha = 0.2; // EMA smoothing factor
       if (newFeature && newFeature.color && newFeature.geometric && this.feature && this.feature.color && this.feature.geometric) {
@@ -640,9 +929,182 @@
         for (let i = 0; i < this.feature.geometric.length; i++) {
           this.feature.geometric[i] = (1 - alpha) * this.feature.geometric[i] + alpha * newFeature.geometric[i];
         }
+        
+        // EMA update for enhanced features
+        if (newFeature.enhanced && this.feature.enhanced) {
+          this.updateEnhancedFeatures(newFeature.enhanced, alpha);
+        } else if (newFeature.enhanced) {
+          this.feature.enhanced = newFeature.enhanced;
+        }
       } else {
         this.feature = newFeature;
       }
+    }
+    
+    /** Update enhanced features with EMA smoothing */
+    updateEnhancedFeatures(newEnhanced, alpha) {
+      if (!this.feature.enhanced) {
+        this.feature.enhanced = newEnhanced;
+        return;
+      }
+      
+      const current = this.feature.enhanced;
+      
+      // Update color centroid
+      if (newEnhanced.colorCentroid && current.colorCentroid) {
+        current.colorCentroid.x = (1 - alpha) * current.colorCentroid.x + alpha * newEnhanced.colorCentroid.x;
+        current.colorCentroid.y = (1 - alpha) * current.colorCentroid.y + alpha * newEnhanced.colorCentroid.y;
+      }
+      
+      // Update color statistics
+      if (newEnhanced.colorStatistics && current.colorStatistics) {
+        const stats = current.colorStatistics;
+        const newStats = newEnhanced.colorStatistics;
+        stats.avgR = (1 - alpha) * stats.avgR + alpha * newStats.avgR;
+        stats.avgG = (1 - alpha) * stats.avgG + alpha * newStats.avgG;
+        stats.avgB = (1 - alpha) * stats.avgB + alpha * newStats.avgB;
+        stats.avgBrightness = (1 - alpha) * stats.avgBrightness + alpha * newStats.avgBrightness;
+        stats.avgSaturation = (1 - alpha) * stats.avgSaturation + alpha * newStats.avgSaturation;
+        stats.variance = (1 - alpha) * stats.variance + alpha * newStats.variance;
+      }
+      
+      // Update other enhanced features
+      if (newEnhanced.colorEntropy !== undefined) {
+        current.colorEntropy = (1 - alpha) * (current.colorEntropy || 0) + alpha * newEnhanced.colorEntropy;
+      }
+      
+      if (newEnhanced.overallBrightness !== undefined) {
+        current.overallBrightness = (1 - alpha) * (current.overallBrightness || 0) + alpha * newEnhanced.overallBrightness;
+      }
+      
+      if (newEnhanced.colorVariance !== undefined) {
+        current.colorVariance = (1 - alpha) * (current.colorVariance || 0) + alpha * newEnhanced.colorVariance;
+      }
+      
+      // Update dominant colors (replace with new ones due to complexity of EMA on clusters)
+      if (newEnhanced.dominantColors && newEnhanced.dominantColors.length > 0) {
+        current.dominantColors = newEnhanced.dominantColors;
+      }
+    }
+    
+    /** Get enhanced appearance match score using all feature parameters */
+    getEnhancedAppearanceScore(detectionFeature) {
+      if (!this.feature || !detectionFeature) return 0;
+      
+      let totalScore = 0;
+      let weightSum = 0;
+      
+      // 1. Color histogram similarity (weight: 0.3)
+      if (this.feature.color && detectionFeature.color) {
+        const colorSim = cosineSimilarity(this.feature.color, detectionFeature.color);
+        totalScore += colorSim * 0.3;
+        weightSum += 0.3;
+      }
+      
+      // 2. Geometric feature similarity (weight: 0.2)
+      if (this.feature.geometric && detectionFeature.geometric) {
+        const geoSim = this.calculateGeometricSimilarity(this.feature.geometric, detectionFeature.geometric);
+        totalScore += geoSim * 0.2;
+        weightSum += 0.2;
+      }
+      
+      // 3. Enhanced features similarity (weight: 0.5)
+      if (this.feature.enhanced && detectionFeature.enhanced) {
+        const enhancedSim = this.calculateEnhancedSimilarity(this.feature.enhanced, detectionFeature.enhanced);
+        totalScore += enhancedSim * 0.5;
+        weightSum += 0.5;
+      }
+      
+      return weightSum > 0 ? totalScore / weightSum : 0;
+    }
+    
+    /** Calculate geometric feature similarity */
+    calculateGeometricSimilarity(geo1, geo2) {
+      if (!geo1 || !geo2 || geo1.length !== geo2.length) return 0;
+      
+      let similarity = 0;
+      const weights = [0.15, 0.2, 0.1, 0.1, 0.1, 0.15, 0.15, 0.025, 0.025]; // Weights for each geometric feature
+      
+      for (let i = 0; i < Math.min(geo1.length, weights.length); i++) {
+        const diff = Math.abs(geo1[i] - geo2[i]);
+        const maxVal = Math.max(Math.abs(geo1[i]), Math.abs(geo2[i]), 1e-6);
+        const featureSim = Math.exp(-diff / maxVal); // Exponential similarity
+        similarity += featureSim * weights[i];
+      }
+      
+      return similarity;
+    }
+    
+    /** Calculate enhanced features similarity */
+    calculateEnhancedSimilarity(enh1, enh2) {
+      let totalSim = 0;
+      let count = 0;
+      
+      // Color centroid similarity (weight: 0.25)
+      if (enh1.colorCentroid && enh2.colorCentroid) {
+        const centroidDist = Math.sqrt(
+          Math.pow(enh1.colorCentroid.x - enh2.colorCentroid.x, 2) +
+          Math.pow(enh1.colorCentroid.y - enh2.colorCentroid.y, 2)
+        );
+        const centroidSim = Math.exp(-centroidDist * 5); // Scale factor for sensitivity
+        totalSim += centroidSim * 0.25;
+        count += 0.25;
+      }
+      
+      // Color statistics similarity (weight: 0.3)
+      if (enh1.colorStatistics && enh2.colorStatistics) {
+        const stats1 = enh1.colorStatistics;
+        const stats2 = enh2.colorStatistics;
+        
+        const brightnessSim = 1 - Math.abs(stats1.avgBrightness - stats2.avgBrightness) / 255;
+        const saturationSim = 1 - Math.abs(stats1.avgSaturation - stats2.avgSaturation);
+        const varianceSim = 1 - Math.abs(stats1.variance - stats2.variance) / Math.max(stats1.variance, stats2.variance, 1);
+        
+        const statsSim = (brightnessSim + saturationSim + varianceSim) / 3;
+        totalSim += statsSim * 0.3;
+        count += 0.3;
+      }
+      
+      // Dominant colors similarity (weight: 0.3)
+      if (enh1.dominantColors && enh2.dominantColors && enh1.dominantColors.length > 0 && enh2.dominantColors.length > 0) {
+        const domColorSim = this.calculateDominantColorSimilarity(enh1.dominantColors, enh2.dominantColors);
+        totalSim += domColorSim * 0.3;
+        count += 0.3;
+      }
+      
+      // Color entropy similarity (weight: 0.15)
+      if (enh1.colorEntropy !== undefined && enh2.colorEntropy !== undefined) {
+        const entropySim = 1 - Math.abs(enh1.colorEntropy - enh2.colorEntropy) / Math.max(enh1.colorEntropy, enh2.colorEntropy, 1);
+        totalSim += entropySim * 0.15;
+        count += 0.15;
+      }
+      
+      return count > 0 ? totalSim / count : 0;
+    }
+    
+    /** Calculate similarity between dominant color sets */
+    calculateDominantColorSimilarity(colors1, colors2) {
+      if (!colors1 || !colors2 || colors1.length === 0 || colors2.length === 0) return 0;
+      
+      let totalSimilarity = 0;
+      let totalWeight = 0;
+      
+      // Compare each color in set 1 with best match in set 2
+      for (const color1 of colors1) {
+        let bestMatch = 0;
+        
+        for (const color2 of colors2) {
+          // Use LAB color space for perceptual distance
+          const distance = deltaE(color1.lab, color2.lab);
+          const similarity = Math.exp(-distance / 50); // Scale factor for color sensitivity
+          bestMatch = Math.max(bestMatch, similarity);
+        }
+        
+        totalSimilarity += bestMatch * color1.weight;
+        totalWeight += color1.weight;
+      }
+      
+      return totalWeight > 0 ? totalSimilarity / totalWeight : 0;
     }
       
     /** Check if track should enter occlusion state with improved logic */
@@ -685,28 +1147,51 @@
       this.maxLostUnlocked = opts.maxLostUnlocked ?? 30; // Reduced for efficiency
       this.maxLostLocked = opts.maxLostLocked ?? 120; // Increased for occlusion tolerance
       
-      // Enhanced matching weights for better tracking
-      // 增强的匹配权重以改善追踪效果
-      this.wIoU = opts.wIoU ?? 0.25;        // Further reduced IoU weight for fast movement
-      this.wApp = opts.wApp ?? 0.35;        // Appearance weight
-      this.wCtr = opts.wCtr ?? 0.20;        // Center distance weight
+      // Enhanced matching weights for robust tracking with enhanced features
+      // 增强特征的鲁棒追踪匹配权重
+      this.wIoU = opts.wIoU ?? 0.20;        // Reduced IoU weight to rely more on enhanced features
+      this.wApp = opts.wApp ?? 0.25;        // Traditional appearance weight
+      this.wEnhanced = opts.wEnhanced ?? 0.35; // Enhanced features weight (highest priority)
+      this.wCtr = opts.wCtr ?? 0.15;        // Center distance weight
       this.wRatio = opts.wRatio ?? 0.05;    // Aspect ratio weight
-      this.wMotion = opts.wMotion ?? 0.15;  // Increased motion consistency weight
       
-      // Adaptive cost thresholds for different scenarios
-      // 针对不同场景的自适应成本阈值
-      this.costThreshold = opts.costThreshold ?? 0.75; // Reduced base threshold for stricter matching
-      this.crowdedSceneThreshold = opts.crowdedSceneThreshold ?? 0.65; // Even stricter for crowded scenes
-      this.lockedTrackThreshold = opts.lockedTrackThreshold ?? 0.85; // More permissive for locked tracks
+      // Adaptive cost thresholds with enhanced feature consideration
+      // 考虑增强特征的自适应成本阈值
+      this.costThreshold = opts.costThreshold ?? 0.70; // Slightly lower for enhanced features
+      this.crowdedSceneThreshold = opts.crowdedSceneThreshold ?? 0.60; // Stricter for crowded scenes
+      this.lockedTrackThreshold = opts.lockedTrackThreshold ?? 0.80; // More permissive for locked tracks
+      this.enhancedFeatureThreshold = opts.enhancedFeatureThreshold ?? 0.65; // Threshold for enhanced feature matching
       this.autoCreate = !!opts.autoCreate;
       
-      // Occlusion handling parameters
-      // 遮挡处理参数
+      // Enhanced feature robustness parameters
+      // 增强特征鲁棒性参数
+      this.robustnessParams = {
+        minFeatureConfidence: 0.3,     // Minimum confidence to use enhanced features
+        adaptiveWeighting: true,       // Enable adaptive feature weighting
+        colorCentroidWeight: 0.3,      // Weight for color centroid in enhanced matching
+        dominantColorWeight: 0.4,      // Weight for dominant color matching
+        colorStatsWeight: 0.3,         // Weight for color statistics
+        featureStabilityWindow: 10,    // Frames to consider for feature stability
+        robustMatchingEnabled: true    // Enable robust matching algorithms
+      };
+      
+      // Occlusion handling parameters with enhanced features
+      // 使用增强特征的遮挡处理参数
       this.occlusionParams = {
-        maxOcclusionFrames: 60,    // Max frames to maintain occluded track
-        reappearanceRadius: 150,   // Search radius for reappearance
-        confidenceDecay: 0.95,     // Confidence decay per frame during occlusion
-        minReappearanceScore: 0.6  // Min score to consider reappearance
+        maxOcclusionFrames: 80,        // Increased with enhanced features
+        reappearanceRadius: 180,       // Larger search radius
+        confidenceDecay: 0.96,         // Slower decay with better features
+        minReappearanceScore: 0.55,    // Lower threshold with enhanced matching
+        enhancedRecoveryEnabled: true  // Use enhanced features for recovery
+      };
+      
+      // Performance monitoring for enhanced features
+      // 增强特征的性能监控
+      this.performanceStats = {
+        enhancedMatches: 0,
+        traditionalMatches: 0,
+        recoveredTracks: 0,
+        featureExtractionTime: 0
       };
       
       // Frame counter for occlusion management
@@ -757,17 +1242,38 @@
         class: d.class || d.label || ''
       }));
 
-      // Optionally compute appearance features (only for focus classes and limited count)
+      // Enhanced feature extraction with performance optimization
+      // 性能优化的增强特征提取
       let enriched = dets;
       if (this.enableReID && videoContext) {
-        const maxFeat = 15; // cap to save cost
-        enriched = dets.map((dd, idx) => {
+        const startTime = performance.now();
+        const maxFeat = this.robustnessParams.robustMatchingEnabled ? 20 : 15; // More features for robust matching
+        
+        // Prioritize detections for feature extraction
+        // 优先处理检测结果进行特征提取
+        const prioritizedDets = this.prioritizeDetectionsForFeatures(dets);
+        
+        enriched = prioritizedDets.map((dd, idx) => {
           let feat = null;
           if (!this.focusClasses.length || this.focusClasses.includes(dd.class)) {
-            if (idx < maxFeat) feat = this.encoder.encode(videoContext, dd) || null;
+            if (idx < maxFeat) {
+              try {
+                feat = this.encoder.encode(videoContext, dd);
+                if (feat && feat.enhanced) {
+                  // Validate enhanced features quality
+                  feat.quality = this.assessFeatureQuality(feat);
+                }
+              } catch (error) {
+                console.warn('Feature extraction failed:', error);
+                feat = null;
+              }
+            }
           }
           return { ...dd, feature: feat };
         });
+        
+        // Update performance stats
+        this.performanceStats.featureExtractionTime = performance.now() - startTime;
       } else {
         enriched = dets.map(dd => ({ ...dd, feature: null }));
       }
@@ -792,9 +1298,9 @@
       } else {
         // Standard mode: detection-first association
         // 标准模式：检测优先关联
-        // Use Hungarian for both locked and normal tracks for optimal assignment
-        this._associateAndUpdateHungarian(locked, enriched, unmatchedDetIdx, true);
-        this._associateAndUpdateHungarian(normal, enriched, unmatchedDetIdx, false);
+        // Use enhanced Hungarian algorithm for optimal assignment with robust features
+        this._associateAndUpdateEnhancedHungarian(locked, enriched, unmatchedDetIdx, true);
+        this._associateAndUpdateEnhancedHungarian(normal, enriched, unmatchedDetIdx, false);
       }
 
       // Increase lost for unmatched tracks
@@ -805,9 +1311,9 @@
         delete t._updatedThisRound;
       }
 
-      // Try to recover lost tracks before creating new ones
-      // 在创建新轨迹前尝试恢复丢失的轨迹
-      this._attemptTrackRecovery(enriched, unmatchedDetIdx);
+      // Enhanced track recovery with robust features
+      // 使用鲁棒特征的增强轨迹恢复
+      this._attemptEnhancedTrackRecovery(enriched, unmatchedDetIdx);
 
       // Optionally create new tracks from remaining detections (if enabled)
       if (this.autoCreate) {
@@ -970,7 +1476,29 @@
           let idSwitchPenalty = 0;
           
           if (this.enableReID && d.feature) {
-            if (t.getAppearanceMatchScore && t.appearanceModel && t.appearanceModel.templates.length > 0) {
+            if (t.getEnhancedAppearanceScore) {
+              // Use enhanced appearance scoring
+              const matchScore = t.getEnhancedAppearanceScore(d.feature);
+              app = 1 - matchScore;
+              
+              // ID switching prevention with enhanced features
+              if (matchScore < 0.7) { // Threshold for enhanced features
+                let betterMatchExists = false;
+                for (const otherTrack of this.tracks) {
+                  if (otherTrack.id !== t.id && otherTrack.getEnhancedAppearanceScore) {
+                    const otherScore = otherTrack.getEnhancedAppearanceScore(d.feature);
+                    if (otherScore > matchScore + 0.2) {
+                      betterMatchExists = true;
+                      break;
+                    }
+                  }
+                }
+                
+                if (betterMatchExists) {
+                  idSwitchPenalty = t.idConsistency ? t.idConsistency.switchPenalty || 0.3 : 0.3;
+                }
+              }
+            } else if (t.getAppearanceMatchScore && t.appearanceModel && t.appearanceModel.templates.length > 0) {
               const matchScore = t.getAppearanceMatchScore(d.feature, d);
               app = 1 - matchScore;
               
@@ -990,8 +1518,8 @@
                   idSwitchPenalty = t.idConsistency.switchPenalty;
                 }
               }
-            } else if (t.feature) {
-              app = clamp(1 - cosineSimilarity(t.feature, d.feature), 0, 1);
+            } else if (t.feature && t.feature.color && d.feature.color) {
+              app = clamp(1 - cosineSimilarity(t.feature.color, d.feature.color), 0, 1);
             } else {
               t.feature = d.feature;
               app = 0.3;
@@ -1112,6 +1640,362 @@
       }
     }
 
+    /** Prioritize detections for feature extraction based on tracking needs */
+    prioritizeDetectionsForFeatures(detections) {
+      // Sort by confidence and existing track proximity
+      // 根据置信度和现有轨迹接近度排序
+      return detections.sort((a, b) => {
+        let scoreA = a.score || 0;
+        let scoreB = b.score || 0;
+        
+        // Boost score if detection is near existing tracks
+        // 如果检测结果靠近现有轨迹则提升分数
+        for (const track of this.tracks) {
+          const distA = Math.sqrt(Math.pow(track.cx - (a.x + a.w/2), 2) + Math.pow(track.cy - (a.y + a.h/2), 2));
+          const distB = Math.sqrt(Math.pow(track.cx - (b.x + b.w/2), 2) + Math.pow(track.cy - (b.y + b.h/2), 2));
+          
+          if (distA < 100) scoreA += 0.2; // Proximity bonus
+          if (distB < 100) scoreB += 0.2;
+        }
+        
+        return scoreB - scoreA; // Higher score first
+      });
+    }
+    
+    /** Assess quality of extracted features */
+    assessFeatureQuality(features) {
+      let quality = 0.5; // Base quality
+      
+      if (features.enhanced) {
+        const enh = features.enhanced;
+        
+        // Color diversity indicates good feature quality
+        if (enh.colorEntropy > 2.0) quality += 0.2;
+        
+        // Dominant colors presence
+        if (enh.dominantColors && enh.dominantColors.length >= 2) quality += 0.15;
+        
+        // Color variance indicates texture richness
+        if (enh.colorVariance > 500) quality += 0.1;
+        
+        // Color centroid stability (not at extreme edges)
+        const centroid = enh.colorCentroid;
+        if (centroid && centroid.x > 0.1 && centroid.x < 0.9 && centroid.y > 0.1 && centroid.y < 0.9) {
+          quality += 0.05;
+        }
+      }
+      
+      return Math.min(1.0, quality);
+    }
+    
+    /** Enhanced Hungarian algorithm with robust feature matching */
+    _associateAndUpdateEnhancedHungarian(trackList, detections, unmatchedDetIdx, isLockedPass) {
+      if (trackList.length === 0 || unmatchedDetIdx.size === 0) return;
+
+      // Build enhanced cost matrix with robust features
+      // 使用鲁棒特征构建增强成本矩阵
+      const detectionArray = Array.from(unmatchedDetIdx).map(idx => detections[idx]);
+      const detectionIndices = Array.from(unmatchedDetIdx);
+      
+      if (detectionArray.length === 0) return;
+      
+      const costMatrix = [];
+      const maxCost = 10.0;
+      
+      for (let ti = 0; ti < trackList.length; ti++) {
+        const t = trackList[ti];
+        const tb = t.bbox;
+        const row = [];
+        
+        // Enhanced adaptive gating with feature-based expansion
+        // 基于特征的增强自适应门控
+        let gating = this.calculateAdaptiveGating(t);
+        
+        for (let di = 0; di < detectionArray.length; di++) {
+          const d = detectionArray[di];
+          const db = { x: d.x, y: d.y, w: d.w, h: d.h };
+          const i = iou(tb, db);
+          const ctr = centerDistance(tb, db);
+          
+          // Enhanced gating check
+          if (i < 0.005 && ctr > gating) {
+            row.push(maxCost);
+            continue;
+          }
+          
+          // Calculate enhanced cost with robust features
+          const cost = this.calculateEnhancedCost(t, d, i, ctr, gating, isLockedPass);
+          row.push(cost > this.getAdaptiveThreshold(t, isLockedPass) ? maxCost : cost);
+        }
+        
+        costMatrix.push(row);
+      }
+      
+      // Solve using Hungarian algorithm
+      const assignments = this.hungarian.solve(costMatrix);
+      
+      // Apply assignments with enhanced validation
+      this.applyEnhancedAssignments(assignments, trackList, detectionArray, detectionIndices, costMatrix, unmatchedDetIdx, isLockedPass);
+    }
+    
+    /** Calculate adaptive gating based on track state and features */
+    calculateAdaptiveGating(track) {
+      const velocityMagnitude = Math.sqrt((track.vx || 0) ** 2 + (track.vy || 0) ** 2);
+      const velocityFactor = Math.min(3.0, 1.0 + velocityMagnitude / 50);
+      let gating = Math.max(this.gatingBase, 0.5 * Math.hypot(track.w, track.h)) * velocityFactor;
+      
+      // Enhanced gating based on feature quality
+      if (track.feature && track.feature.quality > 0.7) {
+        gating *= 1.3; // More permissive for high-quality features
+      }
+      
+      // Occlusion state adjustments
+      if (track.occlusionState && track.occlusionState.isOccluded) {
+        gating = Math.max(gating, track.occlusionState.searchRadius || gating * 2.5);
+      }
+      
+      // Locked track adjustments
+      if (track.locked) {
+        gating *= 1.4;
+      }
+      
+      return gating;
+    }
+    
+    /** Calculate enhanced cost with robust feature integration */
+    calculateEnhancedCost(track, detection, iou_val, centerDist, gating, isLockedPass) {
+      let enhancedCost = 0;
+      let traditionalCost = 0;
+      let hasEnhancedFeatures = false;
+      
+      // Enhanced appearance cost using robust features
+      if (this.enableReID && detection.feature && track.getEnhancedAppearanceScore) {
+        const similarity = track.getEnhancedAppearanceScore(detection.feature);
+        enhancedCost = 1.0 - similarity;
+        hasEnhancedFeatures = true;
+        this.performanceStats.enhancedMatches++;
+      } else if (track.feature && detection.feature) {
+        // Fallback to traditional appearance
+        enhancedCost = this._getAppearanceCost(track, detection, detection.feature);
+        this.performanceStats.traditionalMatches++;
+      } else {
+        enhancedCost = 0.5; // Neutral cost when no features available
+      }
+      
+      // Geometric costs
+      const ratioT = (track.w / (track.h + 1e-3));
+      const ratioD = (detection.w / (detection.h + 1e-3));
+      const ratioDiff = Math.min(1, Math.abs(ratioT - ratioD) / Math.max(ratioT, ratioD));
+      const ctrNorm = clamp(centerDist / (gating * 1.5), 0, 1);
+      
+      // Motion consistency with enhanced prediction
+      const motionCost = this.calculateMotionCost(track, detection, gating);
+      
+      // Adaptive weight calculation
+      const weights = this.calculateAdaptiveWeights(track, detection, hasEnhancedFeatures, isLockedPass);
+      
+      // Combined cost with enhanced features priority
+      const baseCost = weights.iou * (1 - iou_val) + 
+                      weights.appearance * enhancedCost + 
+                      weights.center * ctrNorm + 
+                      weights.ratio * ratioDiff + 
+                      weights.motion * motionCost;
+      
+      // Add robustness penalties
+      const robustnessPenalty = this.calculateRobustnessPenalty(track, detection);
+      
+      return baseCost + robustnessPenalty;
+    }
+    
+    /** Calculate adaptive weights based on feature availability and track state */
+    calculateAdaptiveWeights(track, detection, hasEnhancedFeatures, isLockedPass) {
+      let weights = {
+        iou: this.wIoU,
+        appearance: hasEnhancedFeatures ? this.wEnhanced : this.wApp,
+        center: this.wCtr,
+        ratio: this.wRatio,
+        motion: 0.15
+      };
+      
+      // Adjust for locked tracks
+      if (isLockedPass) {
+        weights.iou *= 0.8;
+        weights.appearance *= 1.3;
+        weights.center *= 1.2;
+        weights.motion *= 1.2;
+      }
+      
+      // Adjust for occlusion
+      if (track.occlusionState && track.occlusionState.isOccluded) {
+        weights.iou *= 0.4;
+        weights.appearance *= 1.6;
+        weights.center *= 1.4;
+        weights.motion *= 1.5;
+      }
+      
+      // Adjust for feature quality
+      if (hasEnhancedFeatures && track.feature && track.feature.quality > 0.8) {
+        weights.appearance *= 1.2; // Trust high-quality features more
+      }
+      
+      return weights;
+    }
+    
+    /** Calculate motion cost with enhanced prediction */
+    calculateMotionCost(track, detection, gating) {
+      const dt = 1/30;
+      const predictedX = track.cx + (track.vx || 0) * dt;
+      const predictedY = track.cy + (track.vy || 0) * dt;
+      const detCenterX = detection.x + detection.w / 2;
+      const detCenterY = detection.y + detection.h / 2;
+      const motionDist = Math.sqrt((predictedX - detCenterX) ** 2 + (predictedY - detCenterY) ** 2);
+      
+      const velocityConfidence = Math.min(1.0, track.hits / 10);
+      const adaptiveMotionGating = gating * (0.5 + 0.5 * velocityConfidence);
+      
+      return clamp(motionDist / adaptiveMotionGating, 0, 1);
+    }
+    
+    /** Calculate robustness penalty for unrealistic associations */
+    calculateRobustnessPenalty(track, detection) {
+      let penalty = 0;
+      
+      // Size change penalty
+      const sizeChangeRatio = Math.max(detection.w/track.w, track.w/detection.w) * 
+                             Math.max(detection.h/track.h, track.h/detection.h);
+      if (sizeChangeRatio > 2.5) {
+        penalty += Math.min(0.4, (sizeChangeRatio - 2.5) * 0.15);
+      }
+      
+      // Trajectory consistency penalty
+      if (track.trajectory.length >= 3) {
+        const recent = track.trajectory.slice(-3);
+        const avgVelX = (recent[2].x - recent[0].x) / 2;
+        const avgVelY = (recent[2].y - recent[0].y) / 2;
+        const expectedX = track.cx + avgVelX;
+        const expectedY = track.cy + avgVelY;
+        
+        const detCenterX = detection.x + detection.w / 2;
+        const detCenterY = detection.y + detection.h / 2;
+        const trajDeviation = Math.sqrt((expectedX - detCenterX)**2 + (expectedY - detCenterY)**2);
+        
+        const maxReasonableDeviation = Math.max(60, Math.hypot(track.w, track.h) * 0.9);
+        if (trajDeviation > maxReasonableDeviation) {
+          penalty += Math.min(0.3, trajDeviation / maxReasonableDeviation * 0.15);
+        }
+      }
+      
+      return penalty;
+    }
+    
+    /** Get adaptive threshold based on track state */
+    getAdaptiveThreshold(track, isLockedPass) {
+      let threshold = this.costThreshold;
+      
+      // Adjust for scene complexity
+      const activeTracks = this.tracks.filter(t => t.lostFrames < 5).length;
+      const isCrowdedScene = activeTracks > 8;
+      
+      if (isCrowdedScene) {
+        threshold = this.crowdedSceneThreshold;
+      }
+      
+      // Adjust for track type
+      if (track.locked) {
+        threshold = Math.max(threshold, this.lockedTrackThreshold);
+      }
+      
+      // Adjust for feature quality
+      if (track.feature && track.feature.quality > 0.8) {
+        threshold *= 1.1; // More permissive for high-quality features
+      }
+      
+      // Adjust for occlusion
+      if (track.occlusionState && track.occlusionState.isOccluded) {
+        threshold *= 1.15;
+      }
+      
+      return threshold;
+    }
+    
+    /** Apply enhanced assignments with validation */
+    applyEnhancedAssignments(assignments, trackList, detectionArray, detectionIndices, costMatrix, unmatchedDetIdx, isLockedPass) {
+      for (let ti = 0; ti < assignments.length; ti++) {
+        const di = assignments[ti];
+        if (di >= 0 && di < detectionArray.length) {
+          const cost = costMatrix[ti][di];
+          const threshold = this.getAdaptiveThreshold(trackList[ti], isLockedPass);
+          
+          if (cost <= threshold) {
+            const t = trackList[ti];
+            const d = detectionArray[di];
+            const originalDetIdx = detectionIndices[di];
+            
+            // Enhanced update with feature validation
+            this.updateTrackWithEnhancedFeatures(t, d);
+            t._updatedThisRound = true;
+            unmatchedDetIdx.delete(originalDetIdx);
+            
+            if (isLockedPass) {
+              console.log(`Enhanced Hungarian: Assigned locked track ${t.id} (cost: ${cost.toFixed(3)}, quality: ${d.feature?.quality?.toFixed(2) || 'N/A'})`);
+            }
+          }
+        }
+      }
+    }
+    
+    /** Update track with enhanced feature validation */
+    updateTrackWithEnhancedFeatures(track, detection) {
+      // Validate feature consistency before update
+      if (detection.feature && track.feature && this.robustnessParams.adaptiveWeighting) {
+        const featureConsistency = this.validateFeatureConsistency(track.feature, detection.feature);
+        if (featureConsistency < this.robustnessParams.minFeatureConfidence) {
+          console.warn(`Low feature consistency for track ${track.id}: ${featureConsistency.toFixed(3)}`);
+          // Still update but with reduced confidence
+          detection.feature.quality = Math.min(detection.feature.quality || 0.5, 0.6);
+        }
+      }
+      
+      track.update({ x: detection.x, y: detection.y, w: detection.w, h: detection.h }, detection.feature);
+    }
+    
+    /** Validate consistency between track and detection features */
+    validateFeatureConsistency(trackFeature, detectionFeature) {
+      if (!trackFeature.enhanced || !detectionFeature.enhanced) return 0.5;
+      
+      let consistency = 0;
+      let count = 0;
+      
+      // Color centroid consistency
+      if (trackFeature.enhanced.colorCentroid && detectionFeature.enhanced.colorCentroid) {
+        const centroidDist = Math.sqrt(
+          Math.pow(trackFeature.enhanced.colorCentroid.x - detectionFeature.enhanced.colorCentroid.x, 2) +
+          Math.pow(trackFeature.enhanced.colorCentroid.y - detectionFeature.enhanced.colorCentroid.y, 2)
+        );
+        consistency += Math.exp(-centroidDist * 8); // Higher sensitivity
+        count++;
+      }
+      
+      // Brightness consistency
+      if (trackFeature.enhanced.overallBrightness !== undefined && detectionFeature.enhanced.overallBrightness !== undefined) {
+        const brightnessDiff = Math.abs(trackFeature.enhanced.overallBrightness - detectionFeature.enhanced.overallBrightness) / 255;
+        consistency += 1 - brightnessDiff;
+        count++;
+      }
+      
+      // Dominant color consistency
+      if (trackFeature.enhanced.dominantColors && detectionFeature.enhanced.dominantColors) {
+        const colorSim = this.calculateDominantColorSimilarity(
+          trackFeature.enhanced.dominantColors, 
+          detectionFeature.enhanced.dominantColors
+        );
+        consistency += colorSim;
+        count++;
+      }
+      
+      return count > 0 ? consistency / count : 0.5;
+    }
+    
     /** Enhanced association with occlusion-aware matching */
     _associateAndUpdate(trackList, detections, unmatchedDetIdx, isLockedPass) {
       if (trackList.length === 0 || unmatchedDetIdx.size === 0) return;
@@ -1155,12 +2039,15 @@
           let idSwitchPenalty = 0;
           
           if (this.enableReID && d.feature) {
-            if (t.getAppearanceMatchScore && t.appearanceModel && t.appearanceModel.templates.length > 0) {
+            if (t.getEnhancedAppearanceScore) {
+              // Use enhanced appearance scoring
+              const matchScore = t.getEnhancedAppearanceScore(d.feature);
+              app = 1 - matchScore;
+            } else if (t.getAppearanceMatchScore && t.appearanceModel && t.appearanceModel.templates.length > 0) {
               const matchScore = t.getAppearanceMatchScore(d.feature, d);
               app = 1 - matchScore;
-              
-            } else if (t.feature) {
-              app = clamp(1 - cosineSimilarity(t.feature, d.feature), 0, 1);
+            } else if (t.feature && t.feature.color && d.feature.color) {
+              app = clamp(1 - cosineSimilarity(t.feature.color, d.feature.color), 0, 1);
             } else {
               t.feature = d.feature;
               app = 0.3;
@@ -1313,7 +2200,218 @@
       }
     }
 
-    /** Enhanced track recovery with ID switching prevention */
+    /** Enhanced track recovery using robust features */
+    _attemptEnhancedTrackRecovery(detections, unmatchedDetIdx) {
+      if (!this.occlusionParams.enhancedRecoveryEnabled) {
+        return this._attemptTrackRecovery(detections, unmatchedDetIdx);
+      }
+      
+      const lostTracks = this.tracks.filter(t => 
+        t.lostFrames > 0 && 
+        t.lostFrames <= this.occlusionParams.maxOcclusionFrames &&
+        !t._updatedThisRound
+      );
+      
+      if (lostTracks.length === 0 || unmatchedDetIdx.size === 0) return;
+      
+      const unmatchedDetections = Array.from(unmatchedDetIdx).map(idx => detections[idx]);
+      const recoveryPairs = [];
+      
+      // Enhanced recovery matching with robust features
+      for (const track of lostTracks) {
+        for (let i = 0; i < unmatchedDetections.length; i++) {
+          const detection = unmatchedDetections[i];
+          const detIdx = Array.from(unmatchedDetIdx)[i];
+          
+          // Calculate enhanced recovery score
+          const recoveryScore = this.calculateEnhancedRecoveryScore(track, detection);
+          
+          if (recoveryScore > this.occlusionParams.minReappearanceScore) {
+            recoveryPairs.push({
+              track,
+              detection,
+              detIdx,
+              score: recoveryScore,
+              distance: this.calculateTrackDetectionDistance(track, detection)
+            });
+          }
+        }
+      }
+      
+      // Sort by recovery score and apply best matches
+      recoveryPairs.sort((a, b) => b.score - a.score);
+      
+      const usedTracks = new Set();
+      const usedDetections = new Set();
+      
+      for (const pair of recoveryPairs) {
+        if (!usedTracks.has(pair.track.id) && !usedDetections.has(pair.detIdx)) {
+          // Successful recovery
+          this.performEnhancedRecovery(pair.track, pair.detection);
+          pair.track._updatedThisRound = true;
+          unmatchedDetIdx.delete(pair.detIdx);
+          
+          usedTracks.add(pair.track.id);
+          usedDetections.add(pair.detIdx);
+          
+          this.performanceStats.recoveredTracks++;
+          console.log(`Enhanced Recovery: Track ${pair.track.id} recovered (score: ${pair.score.toFixed(3)}, lost: ${pair.track.lostFrames} frames)`);
+        }
+      }
+    }
+    
+    /** Calculate enhanced recovery score using robust features */
+    calculateEnhancedRecoveryScore(track, detection) {
+      let score = 0;
+      let components = 0;
+      
+      // Distance component (inverse relationship)
+      const distance = this.calculateTrackDetectionDistance(track, detection);
+      const maxDistance = this.occlusionParams.reappearanceRadius;
+      if (distance <= maxDistance) {
+        score += (1 - distance / maxDistance) * 0.3;
+        components++;
+      } else {
+        return 0; // Too far for recovery
+      }
+      
+      // Enhanced appearance similarity
+      if (this.enableReID && detection.feature && track.getEnhancedAppearanceScore) {
+        const appearanceSim = track.getEnhancedAppearanceScore(detection.feature);
+        score += appearanceSim * 0.5; // High weight for enhanced features
+        components++;
+      } else if (track.feature && detection.feature) {
+        // Fallback to traditional appearance
+        const appearanceCost = this._getAppearanceCost(track, detection, detection.feature);
+        score += (1 - appearanceCost) * 0.4;
+        components++;
+      }
+      
+      // Size consistency
+      const sizeRatio = Math.min(detection.w/track.w, track.w/detection.w) * 
+                       Math.min(detection.h/track.h, track.h/detection.h);
+      if (sizeRatio > 0.5) {
+        score += sizeRatio * 0.2;
+        components++;
+      }
+      
+      // Motion prediction consistency
+      if (track.vx !== undefined && track.vy !== undefined) {
+        const predictedX = track.cx + track.vx * (track.lostFrames / 30);
+        const predictedY = track.cy + track.vy * (track.lostFrames / 30);
+        const detCenterX = detection.x + detection.w / 2;
+        const detCenterY = detection.y + detection.h / 2;
+        const predictionError = Math.sqrt((predictedX - detCenterX)**2 + (predictedY - detCenterY)**2);
+        
+        const maxPredictionError = Math.max(100, Math.hypot(track.w, track.h));
+        if (predictionError <= maxPredictionError) {
+          score += (1 - predictionError / maxPredictionError) * 0.15;
+          components++;
+        }
+      }
+      
+      // Confidence decay based on lost frames
+      const confidenceDecay = Math.pow(this.occlusionParams.confidenceDecay, track.lostFrames);
+      score *= confidenceDecay;
+      
+      return components > 0 ? score : 0;
+    }
+    
+    /** Calculate distance between track and detection */
+    calculateTrackDetectionDistance(track, detection) {
+      const trackCenterX = track.cx;
+      const trackCenterY = track.cy;
+      const detCenterX = detection.x + detection.w / 2;
+      const detCenterY = detection.y + detection.h / 2;
+      
+      return Math.sqrt((trackCenterX - detCenterX)**2 + (trackCenterY - detCenterY)**2);
+    }
+    
+    /** Perform enhanced recovery with feature validation */
+    performEnhancedRecovery(track, detection) {
+      // Reset lost frames
+      track.lostFrames = 0;
+      
+      // Update position with enhanced validation
+      this.updateTrackWithEnhancedFeatures(track, detection);
+      
+      // Reset occlusion state if present
+      if (track.occlusionState) {
+        track.occlusionState.isOccluded = false;
+        track.occlusionState.occlusionFrames = 0;
+      }
+      
+      // Boost confidence for successful recovery
+      if (track.confidence !== undefined) {
+        track.confidence = Math.min(1.0, track.confidence + 0.1);
+      }
+    }
+    
+    /** Calculate dominant color similarity for enhanced features */
+    calculateDominantColorSimilarity(colors1, colors2) {
+      if (!colors1 || !colors2 || colors1.length === 0 || colors2.length === 0) {
+        return 0;
+      }
+      
+      let totalSimilarity = 0;
+      let comparisons = 0;
+      
+      // Compare each color in colors1 with best match in colors2
+      for (const color1 of colors1) {
+        let bestSimilarity = 0;
+        
+        for (const color2 of colors2) {
+          // Convert to LAB for perceptual comparison
+          const lab1 = this.rgbToLab(color1.r, color1.g, color1.b);
+          const lab2 = this.rgbToLab(color2.r, color2.g, color2.b);
+          
+          // Calculate Delta E (CIE76)
+          const deltaE = Math.sqrt(
+            Math.pow(lab1.L - lab2.L, 2) +
+            Math.pow(lab1.a - lab2.a, 2) +
+            Math.pow(lab1.b - lab2.b, 2)
+          );
+          
+          // Convert Delta E to similarity (0-1)
+          const similarity = Math.exp(-deltaE / 50); // Adjust sensitivity
+          bestSimilarity = Math.max(bestSimilarity, similarity);
+        }
+        
+        totalSimilarity += bestSimilarity;
+        comparisons++;
+      }
+      
+      return comparisons > 0 ? totalSimilarity / comparisons : 0;
+    }
+    
+    /** Convert RGB to LAB color space */
+    rgbToLab(r, g, b) {
+      // Normalize RGB values
+      r /= 255;
+      g /= 255;
+      b /= 255;
+      
+      // Convert to XYZ
+      r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+      g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+      b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+      
+      let x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047;
+      let y = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 1.00000;
+      let z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883;
+      
+      x = x > 0.008856 ? Math.pow(x, 1/3) : (7.787 * x) + 16/116;
+      y = y > 0.008856 ? Math.pow(y, 1/3) : (7.787 * y) + 16/116;
+      z = z > 0.008856 ? Math.pow(z, 1/3) : (7.787 * z) + 16/116;
+      
+      return {
+        L: (116 * y) - 16,
+        a: 500 * (x - y),
+        b: 200 * (y - z)
+      };
+    }
+    
+    /** Fallback to original track recovery method */
     _attemptTrackRecovery(detections, unmatchedDetIdx) {
       // Find tracks that are lost but not yet pruned
       // 找到丢失但尚未被清除的轨迹
@@ -1459,24 +2557,69 @@
     }
 
     _getAppearanceCost(track, detBbox, detFeature) {
-      if (!track.feature || !detFeature || !track.feature.color || !detFeature.color) return 1.0;
+      if (!track.feature || !detFeature) return 1.0;
+      
+      // Use enhanced appearance scoring if available
+      if (track.getEnhancedAppearanceScore) {
+        const similarity = track.getEnhancedAppearanceScore(detFeature);
+        return 1.0 - similarity; // Convert similarity to cost
+      }
+      
+      // Fallback to basic appearance cost calculation
+      if (!track.feature.color || !detFeature.color) return 1.0;
 
       // 1. Color Feature Cost (Cosine Distance)
       const colorCost = 1 - cosineSimilarity(track.feature.color, detFeature.color);
 
       // 2. Geometric Feature Cost (Normalized Euclidean Distance)
       let geoDist = 0;
-      const geoWeights = [1, 1, 2, 0.5, 0.5]; // Weights for [aspect, area, conf, x, y]
-      for (let i = 0; i < track.feature.geometric.length; i++) {
+      const geoWeights = [1, 1, 2, 0.5, 0.5, 0.8, 0.8, 0.3, 0.3]; // Extended weights for enhanced geometric features
+      const geoLength = Math.min(track.feature.geometric.length, detFeature.geometric.length, geoWeights.length);
+      
+      for (let i = 0; i < geoLength; i++) {
         const diff = track.feature.geometric[i] - detFeature.geometric[i];
         geoDist += (diff * diff) * geoWeights[i];
       }
-      const geometricCost = Math.min(1.0, Math.sqrt(geoDist) / track.feature.geometric.length);
+      const geometricCost = Math.min(1.0, Math.sqrt(geoDist) / geoLength);
 
-      // 3. Combine costs (50% color, 50% geometric)
-      const combinedCost = 0.5 * colorCost + 0.5 * geometricCost;
+      // 3. Enhanced features cost (if available)
+      let enhancedCost = 0;
+      let hasEnhanced = false;
       
-      return combinedCost;
+      if (track.feature.enhanced && detFeature.enhanced) {
+        // Color centroid cost
+        if (track.feature.enhanced.colorCentroid && detFeature.enhanced.colorCentroid) {
+          const centroidDist = Math.sqrt(
+            Math.pow(track.feature.enhanced.colorCentroid.x - detFeature.enhanced.colorCentroid.x, 2) +
+            Math.pow(track.feature.enhanced.colorCentroid.y - detFeature.enhanced.colorCentroid.y, 2)
+          );
+          enhancedCost += centroidDist * 0.4; // Weight for color centroid
+        }
+        
+        // Overall brightness cost
+        if (track.feature.enhanced.overallBrightness !== undefined && detFeature.enhanced.overallBrightness !== undefined) {
+          const brightnessDiff = Math.abs(track.feature.enhanced.overallBrightness - detFeature.enhanced.overallBrightness) / 255;
+          enhancedCost += brightnessDiff * 0.3; // Weight for brightness
+        }
+        
+        // Color variance cost
+        if (track.feature.enhanced.colorVariance !== undefined && detFeature.enhanced.colorVariance !== undefined) {
+          const maxVariance = Math.max(track.feature.enhanced.colorVariance, detFeature.enhanced.colorVariance, 1);
+          const varianceDiff = Math.abs(track.feature.enhanced.colorVariance - detFeature.enhanced.colorVariance) / maxVariance;
+          enhancedCost += varianceDiff * 0.3; // Weight for color variance
+        }
+        
+        hasEnhanced = true;
+      }
+
+      // 4. Combine costs with adaptive weighting
+      if (hasEnhanced) {
+        // Use enhanced features when available: 30% color, 30% geometric, 40% enhanced
+        return 0.3 * colorCost + 0.3 * geometricCost + 0.4 * Math.min(1.0, enhancedCost);
+      } else {
+        // Fallback to basic features: 50% color, 50% geometric
+        return 0.5 * colorCost + 0.5 * geometricCost;
+      }
     }
 
     /** Remove stale tracks and release their IDs */

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Tracking Integration Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .test-section h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 15px 0;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #666;
+            margin-top: 5px;
+        }
+        .test-canvas {
+            border: 2px solid #ddd;
+            margin: 10px 0;
+        }
+        .controls {
+            margin: 15px 0;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .log {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            padding: 10px;
+            height: 200px;
+            overflow-y: scroll;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .success { color: #28a745; }
+        .warning { color: #ffc107; }
+        .error { color: #dc3545; }
+        .info { color: #17a2b8; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Enhanced Object Tracking Integration Test</h1>
+        <p>This test validates the integration of enhanced features into the robust tracking pipeline.</p>
+        
+        <div class="test-section">
+            <h3>Tracking Performance Statistics</h3>
+            <div class="stats-grid" id="statsGrid">
+                <!-- Stats will be populated here -->
+            </div>
+        </div>
+        
+        <div class="test-section">
+            <h3>Feature Extraction Test</h3>
+            <canvas id="testCanvas" class="test-canvas" width="400" height="300"></canvas>
+            <div class="controls">
+                <button onclick="runFeatureTest()">Test Feature Extraction</button>
+                <button onclick="runTrackingTest()">Test Enhanced Tracking</button>
+                <button onclick="runRecoveryTest()">Test Track Recovery</button>
+                <button onclick="clearLog()">Clear Log</button>
+            </div>
+        </div>
+        
+        <div class="test-section">
+            <h3>Test Log</h3>
+            <div id="testLog" class="log"></div>
+        </div>
+    </div>
+
+    <script src="static/js/tracker.js"></script>
+    <script>
+        let tracker;
+        let testCanvas;
+        let testCtx;
+        let testObjects = [];
+        
+        // Initialize test environment
+        function initTest() {
+            testCanvas = document.getElementById('testCanvas');
+            testCtx = testCanvas.getContext('2d');
+            
+            // Initialize enhanced tracker with robust parameters
+            tracker = new Tracker({
+                enableReID: true,
+                focusClasses: ['person', 'car'],
+                autoCreate: true,
+                wEnhanced: 0.35,
+                robustMatchingEnabled: true,
+                enhancedRecoveryEnabled: true,
+                encoder: {
+                    enableEnhancedFeatures: true,
+                    colorCentroidEnabled: true,
+                    dominantColorsEnabled: true
+                }
+            });
+            
+            log('Enhanced tracker initialized', 'success');
+            updateStats();
+        }
+        
+        // Create test objects with different characteristics
+        function createTestObjects() {
+            testObjects = [
+                {
+                    id: 1,
+                    x: 50, y: 50, w: 80, h: 120,
+                    color: '#FF6B6B', // Red person
+                    vx: 2, vy: 1,
+                    class: 'person',
+                    confidence: 0.9
+                },
+                {
+                    id: 2,
+                    x: 200, y: 100, w: 100, h: 60,
+                    color: '#4ECDC4', // Teal car
+                    vx: -1, vy: 0.5,
+                    class: 'car',
+                    confidence: 0.85
+                },
+                {
+                    id: 3,
+                    x: 300, y: 150, w: 70, h: 100,
+                    color: '#45B7D1', // Blue person
+                    vx: -1.5, vy: -0.8,
+                    class: 'person',
+                    confidence: 0.8
+                }
+            ];
+        }
+        
+        // Draw test objects on canvas
+        function drawTestObjects() {
+            testCtx.clearRect(0, 0, testCanvas.width, testCanvas.height);
+            
+            testObjects.forEach(obj => {
+                // Draw object
+                testCtx.fillStyle = obj.color;
+                testCtx.fillRect(obj.x, obj.y, obj.w, obj.h);
+                
+                // Draw border
+                testCtx.strokeStyle = '#333';
+                testCtx.lineWidth = 2;
+                testCtx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+                
+                // Draw label
+                testCtx.fillStyle = '#333';
+                testCtx.font = '12px Arial';
+                testCtx.fillText(`${obj.class} ${obj.id}`, obj.x, obj.y - 5);
+            });
+        }
+        
+        // Update object positions
+        function updateObjectPositions() {
+            testObjects.forEach(obj => {
+                obj.x += obj.vx;
+                obj.y += obj.vy;
+                
+                // Bounce off walls
+                if (obj.x <= 0 || obj.x + obj.w >= testCanvas.width) {
+                    obj.vx = -obj.vx;
+                }
+                if (obj.y <= 0 || obj.y + obj.h >= testCanvas.height) {
+                    obj.vy = -obj.vy;
+                }
+                
+                // Keep in bounds
+                obj.x = Math.max(0, Math.min(obj.x, testCanvas.width - obj.w));
+                obj.y = Math.max(0, Math.min(obj.y, testCanvas.height - obj.h));
+            });
+        }
+        
+        // Test enhanced feature extraction
+        function runFeatureTest() {
+            log('Starting enhanced feature extraction test...', 'info');
+            
+            createTestObjects();
+            drawTestObjects();
+            
+            // Extract features from each test object
+            testObjects.forEach(obj => {
+                try {
+                    const detection = {
+                        bbox: [obj.x, obj.y, obj.w, obj.h],
+                        score: obj.confidence,
+                        class: obj.class
+                    };
+                    
+                    const features = tracker.encoder.encode(testCtx, detection);
+                    
+                    if (features && features.enhanced) {
+                        log(`✓ Enhanced features extracted for ${obj.class} ${obj.id}:`, 'success');
+                        log(`  - Color centroid: (${features.enhanced.colorCentroid?.x?.toFixed(2)}, ${features.enhanced.colorCentroid?.y?.toFixed(2)})`, 'info');
+                        log(`  - Dominant colors: ${features.enhanced.dominantColors?.length || 0}`, 'info');
+                        log(`  - Color entropy: ${features.enhanced.colorEntropy?.toFixed(2)}`, 'info');
+                        log(`  - Feature quality: ${features.quality?.toFixed(2)}`, 'info');
+                    } else {
+                        log(`✗ Failed to extract enhanced features for ${obj.class} ${obj.id}`, 'error');
+                    }
+                } catch (error) {
+                    log(`✗ Error extracting features: ${error.message}`, 'error');
+                }
+            });
+            
+            updateStats();
+        }
+        
+        // Test enhanced tracking pipeline
+        function runTrackingTest() {
+            log('Starting enhanced tracking pipeline test...', 'info');
+            
+            createTestObjects();
+            let frameCount = 0;
+            const maxFrames = 50;
+            
+            function trackingLoop() {
+                if (frameCount >= maxFrames) {
+                    log(`✓ Tracking test completed (${maxFrames} frames)`, 'success');
+                    logTrackingResults();
+                    updateStats();
+                    return;
+                }
+                
+                // Update positions
+                updateObjectPositions();
+                drawTestObjects();
+                
+                // Create detections
+                const detections = testObjects.map(obj => ({
+                    bbox: [obj.x, obj.y, obj.w, obj.h],
+                    score: obj.confidence + (Math.random() - 0.5) * 0.1, // Add noise
+                    class: obj.class
+                }));
+                
+                // Run tracking update
+                try {
+                    tracker.update(detections, testCtx);
+                    
+                    if (frameCount % 10 === 0) {
+                        log(`Frame ${frameCount}: ${tracker.tracks.length} active tracks`, 'info');
+                    }
+                } catch (error) {
+                    log(`✗ Tracking error at frame ${frameCount}: ${error.message}`, 'error');
+                }
+                
+                frameCount++;
+                setTimeout(trackingLoop, 100); // 10 FPS simulation
+            }
+            
+            trackingLoop();
+        }
+        
+        // Test track recovery mechanism
+        function runRecoveryTest() {
+            log('Starting track recovery test...', 'info');
+            
+            createTestObjects();
+            drawTestObjects();
+            
+            // Initialize tracks
+            const initialDetections = testObjects.map(obj => ({
+                bbox: [obj.x, obj.y, obj.w, obj.h],
+                score: obj.confidence,
+                class: obj.class
+            }));
+            
+            tracker.update(initialDetections, testCtx);
+            log(`✓ Initialized ${tracker.tracks.length} tracks`, 'success');
+            
+            // Simulate occlusion (remove middle object)
+            const occludedDetections = testObjects.filter(obj => obj.id !== 2).map(obj => ({
+                bbox: [obj.x, obj.y, obj.w, obj.h],
+                score: obj.confidence,
+                class: obj.class
+            }));
+            
+            // Run several frames without the occluded object
+            for (let i = 0; i < 10; i++) {
+                tracker.update(occludedDetections, testCtx);
+            }
+            
+            const lostTracks = tracker.tracks.filter(t => t.lostFrames > 0);
+            log(`✓ ${lostTracks.length} tracks lost during occlusion`, 'warning');
+            
+            // Simulate reappearance
+            const reappearanceDetections = testObjects.map(obj => ({
+                bbox: [obj.x + 50, obj.y + 30, obj.w, obj.h], // Slightly different position
+                score: obj.confidence,
+                class: obj.class
+            }));
+            
+            tracker.update(reappearanceDetections, testCtx);
+            
+            const recoveredTracks = tracker.tracks.filter(t => t.lostFrames === 0);
+            log(`✓ ${recoveredTracks.length} tracks active after recovery attempt`, 'success');
+            
+            updateStats();
+        }
+        
+        // Log tracking results
+        function logTrackingResults() {
+            const stats = tracker.getEnhancedStats();
+            
+            log('=== Tracking Results ===', 'info');
+            log(`Active tracks: ${stats.activeTracks}`, 'info');
+            log(`Total tracks created: ${stats.totalTracks}`, 'info');
+            log(`Enhanced matches: ${stats.enhancedFeatures.enhancedMatches}`, 'success');
+            log(`Traditional matches: ${stats.enhancedFeatures.traditionalMatches}`, 'info');
+            log(`Recovered tracks: ${stats.enhancedFeatures.recoveredTracks}`, 'success');
+            log(`Enhanced match ratio: ${(stats.enhancedFeatures.enhancedMatchRatio * 100).toFixed(1)}%`, 'success');
+            log(`Feature extraction time: ${stats.enhancedFeatures.featureExtractionTime.toFixed(2)}ms`, 'info');
+        }
+        
+        // Update statistics display
+        function updateStats() {
+            const statsGrid = document.getElementById('statsGrid');
+            const stats = tracker ? tracker.getEnhancedStats() : {};
+            
+            statsGrid.innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-value">${stats.activeTracks || 0}</div>
+                    <div class="stat-label">Active Tracks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${stats.enhancedFeatures?.enhancedMatches || 0}</div>
+                    <div class="stat-label">Enhanced Matches</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${stats.enhancedFeatures?.recoveredTracks || 0}</div>
+                    <div class="stat-label">Recovered Tracks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${((stats.enhancedFeatures?.enhancedMatchRatio || 0) * 100).toFixed(1)}%</div>
+                    <div class="stat-label">Enhanced Match Ratio</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${(stats.enhancedFeatures?.featureExtractionTime || 0).toFixed(1)}ms</div>
+                    <div class="stat-label">Feature Extraction Time</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${stats.robustness?.robustMatchingEnabled ? 'ON' : 'OFF'}</div>
+                    <div class="stat-label">Robust Matching</div>
+                </div>
+            `;
+        }
+        
+        // Logging function
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('testLog');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = type;
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            logDiv.appendChild(logEntry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        // Clear log
+        function clearLog() {
+            document.getElementById('testLog').innerHTML = '';
+        }
+        
+        // Initialize on page load
+        window.addEventListener('load', initTest);
+    </script>
+</body>
+</html>
