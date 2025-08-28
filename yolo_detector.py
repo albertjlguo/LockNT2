@@ -6,12 +6,9 @@ Uses OpenCV DNN module to run YOLOv11 models without heavy PyTorch dependencies
 使用OpenCV DNN模块运行YOLOv11模型，无需重型PyTorch依赖
 """
 
-import cv2
 import numpy as np
-import requests
 import os
-from typing import List, Dict, Tuple, Optional
-import json
+from typing import List, Dict
 import time
 
 class YOLOv11Detector:
@@ -53,38 +50,11 @@ class YOLOv11Detector:
         self.use_enhanced_coco = True
         self.model_urls = []  # No download needed
         
-        self.model_path = 'static/models/yolo11n.onnx'
+        # No model path needed for enhanced detection
+        # 增强检测不需要模型路径
         
-    def download_model(self) -> bool:
-        """
-        Download YOLOv11 ONNX model for OpenCV DNN
-        下载用于OpenCV DNN的YOLOv11 ONNX模型
-        """
-        os.makedirs('static/models', exist_ok=True)
-        
-        if os.path.exists(self.model_path):
-            print(f"Model already exists: {self.model_path}")
-            return True
-            
-        for url in self.model_urls:
-            try:
-                print(f"Downloading model from: {url}")
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                
-                with open(self.model_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                print(f"Model downloaded successfully: {self.model_path}")
-                return True
-                
-            except Exception as e:
-                print(f"Failed to download from {url}: {e}")
-                continue
-                
-        return False
+    # Model download not needed for enhanced detection
+    # 增强检测不需要模型下载
     
     def load_model(self) -> bool:
         """
@@ -102,95 +72,11 @@ class YOLOv11Detector:
             print(f"Error loading enhanced detector: {e}")
             return False
     
-    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Preprocess image for YOLOv11 inference
-        为YOLOv11推理预处理图像
-        """
-        # Create blob from image
-        # 从图像创建blob
-        blob = cv2.dnn.blobFromImage(
-            image, 
-            1/255.0,  # Scale factor
-            (self.input_size, self.input_size),  # Size
-            (0, 0, 0),  # Mean
-            swapRB=True,  # Swap R and B channels
-            crop=False
-        )
-        return blob
+    # Preprocessing not needed for enhanced detection
+    # 增强检测不需要预处理
     
-    def postprocess_detections(self, outputs: List[np.ndarray], image_shape: Tuple[int, int]) -> List[Dict]:
-        """
-        Post-process YOLOv11 detection outputs
-        后处理YOLOv11检测输出
-        """
-        detections = []
-        
-        if len(outputs) == 0:
-            return detections
-            
-        # YOLOv11 output format: [batch, 84, 8400] where 84 = 4 (bbox) + 80 (classes)
-        # YOLOv11输出格式：[批次, 84, 8400]，其中84 = 4（边界框）+ 80（类别）
-        output = outputs[0][0]  # Remove batch dimension
-        
-        # Transpose to [8400, 84]
-        # 转置为[8400, 84]
-        output = output.T
-        
-        boxes = []
-        scores = []
-        class_ids = []
-        
-        img_height, img_width = image_shape[:2]
-        x_scale = img_width / self.input_size
-        y_scale = img_height / self.input_size
-        
-        for detection in output:
-            # Extract bbox and class scores
-            # 提取边界框和类别分数
-            bbox = detection[:4]
-            class_scores = detection[4:]
-            
-            # Get best class
-            # 获取最佳类别
-            class_id = np.argmax(class_scores)
-            confidence = class_scores[class_id]
-            
-            if confidence > self.confidence_threshold:
-                class_name = self.class_names[class_id]
-                
-                # Filter to target classes
-                # 过滤到目标类别
-                if class_name not in self.target_classes:
-                    continue
-                
-                # Convert from center format to corner format
-                # 从中心格式转换为角点格式
-                cx, cy, w, h = bbox
-                x = (cx - w/2) * x_scale
-                y = (cy - h/2) * y_scale
-                w = w * x_scale
-                h = h * y_scale
-                
-                boxes.append([int(x), int(y), int(w), int(h)])
-                scores.append(float(confidence))
-                class_ids.append(class_id)
-        
-        # Apply Non-Maximum Suppression
-        # 应用非极大值抑制
-        if len(boxes) > 0:
-            indices = cv2.dnn.NMSBoxes(boxes, scores, self.confidence_threshold, self.nms_threshold)
-            
-            if len(indices) > 0:
-                for i in indices.flatten():
-                    x, y, w, h = boxes[i]
-                    detections.append({
-                        'bbox': [x, y, w, h],
-                        'class': self.class_names[class_ids[i]],
-                        'score': scores[i]
-                    })
-        
-        return detections
+    # Postprocessing not needed for enhanced detection
+    # 增强检测不需要后处理
     
     def detect_objects(self, image: np.ndarray) -> List[Dict]:
         """
@@ -268,10 +154,9 @@ class YOLOv11Detector:
         """Get model information"""
         return {
             'model_loaded': self.model_loaded,
-            'model_path': self.model_path,
+            'model_type': 'Enhanced YOLOv11 (Lightweight)',
             'input_size': self.input_size,
             'confidence_threshold': self.confidence_threshold,
-            'nms_threshold': self.nms_threshold,
             'target_classes': self.target_classes
         }
 

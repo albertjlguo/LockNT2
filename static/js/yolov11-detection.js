@@ -30,21 +30,13 @@ class YOLOv11DetectionManager {
             truck: 0.4
         };
         
-        // YOLOv11 model configuration
-        // YOLOv11 模型配置
+        // Server-side YOLOv11 configuration
+        // 服务器端YOLOv11配置
         this.modelConfig = {
-            // Use lightweight web-optimized models from CDN
-            // 使用CDN上的轻量级Web优化模型
-            modelPaths: [
-                'https://tfhub.dev/tensorflow/tfjs-model/ssd_mobilenet_v2/1/default/1/model.json?tfjs-format=file',
-                'https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json',
-                'fallback-to-coco-ssd'  // Special flag to use COCO-SSD
-            ],
-            currentPathIndex: 0,
-            inputSize: 640,  // YOLOv11 default input size / YOLOv11默认输入尺寸
-            maxDetections: 100,  // Maximum detections per frame / 每帧最大检测数
-            iouThreshold: 0.45,  // NMS IoU threshold / NMS IoU阈值
-            scoreThreshold: 0.25  // Base score threshold / 基础分数阈值
+            serverEndpoint: '/yolo_detect',
+            statusEndpoint: '/yolo_status',
+            maxDetections: 100,
+            scoreThreshold: 0.25
         };
         
         // Class names mapping (COCO 80 classes)
@@ -144,49 +136,8 @@ class YOLOv11DetectionManager {
         }
     }
 
-    /**
-     * Warm up the model for better initial performance
-     * 预热模型以获得更好的初始性能
-     */
-    async warmupModel() {
-        try {
-            // Create dummy input with correct data type
-            // 使用正确的数据类型创建虚拟输入
-            let dummyInput;
-            if (this.modelExpectsInt32) {
-                // Create int32 tensor with values in [0, 255] range
-                // 创建值在[0, 255]范围内的int32张量
-                dummyInput = tf.randomUniform(
-                    [1, this.modelConfig.inputSize, this.modelConfig.inputSize, 3], 
-                    0, 256, 'int32'
-                );
-            } else {
-                // Create float32 tensor with values in [0, 1] range
-                // 创建值在[0, 1]范围内的float32张量
-                dummyInput = tf.randomUniform(
-                    [1, this.modelConfig.inputSize, this.modelConfig.inputSize, 3], 
-                    0, 1, 'float32'
-                );
-            }
-            
-            const prediction = await this.model.executeAsync(dummyInput);
-            
-            // Clean up tensors
-            // 清理张量
-            if (Array.isArray(prediction)) {
-                prediction.forEach(t => t.dispose());
-            } else {
-                prediction.dispose();
-            }
-            dummyInput.dispose();
-            
-            console.log('Model warmup completed successfully');
-        } catch (error) {
-            console.warn('Model warmup failed:', error.message);
-            // Don't throw error here, just log the warning
-            // 不要在这里抛出错误，只记录警告
-        }
-    }
+    // Warmup not needed for server-side detection
+    // 服务器端检测不需要预热
 
     /**
      * Fallback to COCO-SSD model if YOLOv11 fails
