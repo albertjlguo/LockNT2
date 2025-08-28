@@ -65,7 +65,9 @@ class ObjectDetectionManager {
             this.updateModelStatus('loading', 'Loading AI Model...');
             
             // Load the COCO-SSD model
-            this.model = await cocoSsd.load();
+            this.model = await cocoSsd.load({
+              base: 'lite_mobilenet_v2'
+            });
             this.isModelLoaded = true;
             
             this.updateModelStatus('ready', 'AI Model Ready');
