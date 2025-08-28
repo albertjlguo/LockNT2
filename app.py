@@ -15,4 +15,5 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 from routes import *
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5001))
+    app.run(host='0.0.0.0', port=port, debug=True)
