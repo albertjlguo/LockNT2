@@ -124,9 +124,16 @@ def video_feed_mjpeg():
             try:
                 frame = stream_processor.get_latest_frame()
 
+                # If frame is not available, wait briefly and retry.
+                # This handles the initial startup race condition.
+                # 如果帧不可用，请稍等片刻然后重试。这可以解决初始启动竞态条件。
+                if frame is None:
+                    time.sleep(0.1)  # Wait for the first frame to be ready
+                    continue
+
                 # Send frame only if it's new to avoid redundant transmissions
                 # 仅当帧为新时才发送，以避免冗余传输
-                if frame is not None and frame != last_frame_sent:
+                if frame != last_frame_sent:
                     last_frame_sent = frame
                     yield (
                         b"--" + boundary.encode() + b"\r\n"
