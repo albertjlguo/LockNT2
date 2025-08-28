@@ -26,7 +26,7 @@ class StreamProcessor:
         
         # Frame buffer for smoother streaming
         # 帧缓冲区以实现更流畅的流媒体传输
-        self.frame_buffer = deque(maxlen=16)  # User preference: moderate buffer for smoother playback
+        self.frame_buffer = deque(maxlen=3)  # Small buffer to reduce latency
         self.buffer_lock = threading.Lock()
         
         # Performance monitoring
@@ -35,17 +35,29 @@ class StreamProcessor:
         self.dropped_frames = 0
 
     def validate_stream(self):
-        """Validate if the YouTube URL is actually retrievable for playback.
-        通过尝试获取直链来验证能否实际播放。
-        """
+        """Validate if the YouTube URL is accessible and is a live stream."""
         try:
-            # Prefer testing real playback capability via get_stream_url
-            # 优先通过获取直链验证实际播放能力
-            stream_url = self.get_stream_url()
-            if stream_url:
-                return True, "Stream is valid."
-            else:
-                return False, "Unable to retrieve direct stream URL via yt-dlp."
+            # Use yt-dlp to get stream info
+            cmd = ['yt-dlp', '--dump-json', '--no-download', self.youtube_url]
+            if os.path.exists('cookies.txt'):
+                cmd.extend(['--cookies', 'cookies.txt'])
+                logging.info("Using local cookies.txt file for validation.")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                error_output = result.stderr.strip()
+                logging.error(f"yt-dlp error: {error_output}")
+                return False, error_output or "yt-dlp returned a non-zero exit code."
+            
+            info = json.loads(result.stdout)
+            
+            # Check if it's a live stream
+            is_live = info.get('is_live', False)
+            if not is_live:
+                logging.warning("URL may not be a live stream, but attempting to process anyway")
+            
+            return True, "Stream is valid."
             
         except subprocess.TimeoutExpired:
             logging.error("Timeout while validating stream")
@@ -57,39 +69,21 @@ class StreamProcessor:
     def get_stream_url(self):
         """Get the direct stream URL using yt-dlp."""
         try:
-            base_cmd = ['yt-dlp', '--get-url', '--format', 'best[height<=720]/best', self.youtube_url]
-            attempts = []
-            # 1) With cookies if available
+            cmd = ['yt-dlp', '--get-url', '--format', 'best[height<=720]', self.youtube_url]
             if os.path.exists('cookies.txt'):
-                attempts.append(base_cmd + ['--cookies', 'cookies.txt'])
+                cmd.extend(['--cookies', 'cookies.txt'])
                 logging.info("Using local cookies.txt file for getting stream URL.")
-            # 2) Try different player clients (some bypass additional checks)
-            attempts.append(base_cmd + ['--extractor-args', 'youtube:player_client=android'])
-            attempts.append(base_cmd + ['--extractor-args', 'youtube:player_client=ios'])
-            # 3) Last fallback: no cookies, default client
-            attempts.append(base_cmd)
-
-            for idx, cmd in enumerate(attempts, 1):
-                try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                    if result.returncode == 0 and result.stdout.strip():
-                        stream_url = result.stdout.strip()
-                        logging.info(f"Got stream URL (attempt {idx}): {stream_url[:100]}...")
-                        return stream_url
-                    else:
-                        err = (result.stderr or "").strip()
-                        if err:
-                            logging.error(f"yt-dlp error getting URL (attempt {idx}): {err}")
-                        # Detect bot-check/auth requirement and stop early to avoid endless retries
-                        if 'Sign in to confirm you’re not a bot' in err or 'confirm you\u2019re not a bot' in err:
-                            logging.error("YouTube requires authentication or bot confirmation. Provide cookies.txt or use authenticated environment.")
-                            return None
-                except subprocess.TimeoutExpired:
-                    logging.error(f"yt-dlp timeout getting URL (attempt {idx})")
-                except Exception as inner:
-                    logging.error(f"Error running yt-dlp (attempt {idx}): {inner}")
-            return None
-        
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                logging.error(f"yt-dlp error getting URL: {result.stderr}")
+                return None
+            
+            stream_url = result.stdout.strip()
+            logging.info(f"Got stream URL: {stream_url[:100]}...")
+            return stream_url
+            
         except Exception as e:
             logging.error(f"Error getting stream URL: {str(e)}")
             return None
@@ -139,7 +133,6 @@ class StreamProcessor:
                 self._fps_window_start = time.time()
                 self._fps_window_count = 0
                 consecutive_failures = 0
-                last_success_time = time.time()
                 max_consecutive_failures = 10
                 
                 while self.is_running:
@@ -159,7 +152,6 @@ class StreamProcessor:
                         
                         # Reset failure counter on successful read
                         consecutive_failures = 0
-                        last_success_time = time.time()
                         
                         # Validate frame
                         if frame is None or frame.size == 0:
@@ -180,8 +172,8 @@ class StreamProcessor:
                         
                         # Resize frame for processing
                         height, width = frame.shape[:2]
-                        if width > 960:
-                            scale = 960 / width
+                        if width > 1280:
+                            scale = 1280 / width
                             new_width = int(width * scale)
                             new_height = int(height * scale)
                             frame = cv2.resize(frame, (new_width, new_height))
@@ -189,9 +181,9 @@ class StreamProcessor:
                         # Encode frame as JPEG with optimized settings
                         # 使用优化设置编码JPEG帧
                         encode_params = [
-                            cv2.IMWRITE_JPEG_QUALITY, 65,  # Lower quality for reduced CPU/bandwidth
-                            cv2.IMWRITE_JPEG_OPTIMIZE, 0,  # Disable heavy optimization to save CPU
-                            cv2.IMWRITE_JPEG_PROGRESSIVE, 0  # Disable progressive to reduce latency
+                            cv2.IMWRITE_JPEG_QUALITY, 75,  # Reduced quality for better performance
+                            cv2.IMWRITE_JPEG_OPTIMIZE, 1,  # Enable JPEG optimization
+                            cv2.IMWRITE_JPEG_PROGRESSIVE, 1  # Progressive JPEG for better streaming
                         ]
                         success, buffer = cv2.imencode('.jpg', frame, encode_params)
                         
@@ -221,25 +213,11 @@ class StreamProcessor:
                         
                         # Adaptive frame rate control for smoother streaming
                         # 自适应帧率控制以提升流畅度
-                        # Measure processing time for this iteration BEFORE using it
-                        # 在使用 processing_time 前先计算本次循环处理时长
-                        processing_time = time.time() - now
-                        # Adaptive FPS: lower when processing is slow to prevent backlog
-                        # 自适应FPS：处理慢时降低帧率，避免堆积
-                        target_fps = 24  # base lower fps for stability / 更稳定的基础FPS
-                        if processing_time > 1.0 / 22:
-                            target_fps = 20
-                        if processing_time > 1.0 / 18:
-                            target_fps = 18
+                        target_fps = 30  # Reduced from 60 for better stability
                         frame_time = 1.0 / target_fps
-                        sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep / 至少1毫秒
+                        processing_time = time.time() - now
+                        sleep_time = max(0.001, frame_time - processing_time)  # Minimum 1ms sleep
                         time.sleep(sleep_time)
-
-                        # Stall detection: if no successful frame for >3s, reconnect
-                        # 卡顿检测：若超过3秒无成功帧，触发重连
-                        if time.time() - last_success_time > 3.0:
-                            logging.error("Frame stall detected (>3s with no frames), reconnecting...")
-                            break
                         
                     except Exception as frame_error:
                         logging.error(f"Error processing frame: {str(frame_error)}")
@@ -271,9 +249,6 @@ class StreamProcessor:
                     self.cap.release()
                     self.cap = None
         
-        # Mark processor as no longer running before cleanup so routes see the correct state
-        # 在清理之前将处理器标记为未运行，以便路由能正确感知状态
-        self.is_running = False
         self.cleanup()
         logging.info("Stream processing stopped")
     
