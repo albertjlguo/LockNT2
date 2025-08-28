@@ -3,8 +3,14 @@ import json
 from flask import render_template, request, jsonify, Response
 from app import app
 from stream_processor import StreamProcessor
+from yolo_detector import yolo_detector
+import cv2
+import numpy as np
 import threading
 import time
+import base64
+from io import BytesIO
+from PIL import Image
 from urllib.parse import urlparse
 
 # Global stream processor instance
@@ -105,6 +111,56 @@ def video_feed():
         return Response(frame, mimetype='image/jpeg')
     else:
         return Response("No frame available", status=503)
+
+@app.route('/yolo_detect', methods=['POST'])
+def yolo_detect():
+    """
+    YOLOv11 detection endpoint for server-side object detection
+    YOLOv11检测端点，用于服务器端目标检测
+    """
+    try:
+        # Get image data from request
+        # 从请求中获取图像数据
+        data = request.get_json()
+        if not data or 'image' not in data:
+            return jsonify({'error': 'No image data provided'}), 400
+        
+        # Decode base64 image
+        # 解码base64图像
+        image_data = data['image']
+        if image_data.startswith('data:image'):
+            image_data = image_data.split(',')[1]
+        
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(BytesIO(image_bytes))
+        
+        # Convert PIL image to OpenCV format
+        # 将PIL图像转换为OpenCV格式
+        opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        
+        # Set confidence threshold if provided
+        # 如果提供则设置置信度阈值
+        if 'confidence' in data:
+            yolo_detector.set_confidence_threshold(data['confidence'])
+        
+        # Run YOLOv11 detection
+        # 运行YOLOv11检测
+        detections = yolo_detector.detect_objects(opencv_image)
+        
+        return jsonify({
+            'success': True,
+            'detections': detections,
+            'model_info': yolo_detector.get_model_info()
+        })
+        
+    except Exception as e:
+        logging.error(f"YOLOv11 detection error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/yolo_status')
+def yolo_status():
+    """Get YOLOv11 model status"""
+    return jsonify(yolo_detector.get_model_info())
 
 @app.route('/video_feed_mjpeg')
 def video_feed_mjpeg():
