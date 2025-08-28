@@ -76,21 +76,34 @@
 
   // ----------------------- Appearance Encoder --------------------------
   /**
-   * HSV histogram encoder (coarse bins) for lightweight appearance features.
-   * Default bins: H=16, S=4, V=2 => 128-D feature.
+   * Enhanced HSV histogram encoder with spatial information for better discrimination
+   * 增强的HSV直方图编码器，包含空间信息以提高区分度
+   * Default bins: H=20, S=6, V=4 + spatial bins => 480-D + 36-D spatial = 516-D feature.
    */
   class AppearanceEncoder {
     constructor(opts = {}) {
-      this.binsH = opts.binsH || 16;
-      this.binsS = opts.binsS || 4;
-      this.binsV = opts.binsV || 2;
-      this.innerCrop = clamp(opts.innerCrop ?? 0.8, 0.5, 1.0);
-      this.sampleStep = opts.sampleStep || 2; // pixel stride to reduce cost
-      const dim = this.binsH * this.binsS * this.binsV;
-      this._tmp = new Float32Array(dim);
+      // Increased bins for better discrimination in crowded scenes
+      // 增加直方图bins以在密集场景中提高区分度
+      this.binsH = opts.binsH || 20;  // Increased from 16
+      this.binsS = opts.binsS || 6;   // Increased from 4
+      this.binsV = opts.binsV || 4;   // Increased from 2
+      this.innerCrop = clamp(opts.innerCrop ?? 0.85, 0.5, 1.0); // Slightly larger crop
+      this.sampleStep = opts.sampleStep || 2;
+      
+      // Add spatial grid for position-aware features
+      // 添加空间网格以获得位置感知特征
+      this.spatialGridH = opts.spatialGridH || 3;
+      this.spatialGridW = opts.spatialGridW || 3;
+      
+      const colorDim = this.binsH * this.binsS * this.binsV;
+      const spatialDim = this.spatialGridH * this.spatialGridW * 4; // 4 basic color stats per cell
+      this.totalDim = colorDim + spatialDim;
+      
+      this._tmp = new Float32Array(this.totalDim);
+      this._spatialTmp = new Float32Array(spatialDim);
     }
 
-    /** Extract appearance feature from canvas 2D context within bbox */
+    /** Enhanced feature extraction with spatial information for better ID consistency */
     extract(ctx, bbox) {
       const x = bbox.x + (1 - this.innerCrop) * 0.5 * bbox.w;
       const y = bbox.y + (1 - this.innerCrop) * 0.5 * bbox.h;
@@ -99,16 +112,20 @@
 
       const ix = Math.round(x), iy = Math.round(y);
       const iw = Math.max(1, Math.round(w)), ih = Math.max(1, Math.round(h));
-      if (iw < 4 || ih < 4) return null; // too small
+      if (iw < 6 || ih < 6) return null; // Increased minimum size for spatial features
 
       let img;
       try { img = ctx.getImageData(ix, iy, iw, ih); }
-      catch (e) { return null; } // likely tainted canvas or out-of-bounds
+      catch (e) { return null; }
 
+      const colorDim = this.binsH * this.binsS * this.binsV;
       const hist = this._tmp; hist.fill(0);
-      const data = img.data; // RGBA of length iw*ih*4
+      const spatialFeats = this._spatialTmp; spatialFeats.fill(0);
+      const data = img.data;
       const step = Math.max(1, this.sampleStep);
 
+      // Extract global color histogram
+      // 提取全局颜色直方图
       for (let yy = 0; yy < ih; yy += step) {
         for (let xx = 0; xx < iw; xx += step) {
           const p = (yy * iw + xx) * 4;
@@ -122,7 +139,53 @@
         }
       }
 
-      return l2normalize(new Float32Array(hist));
+      // Extract spatial grid features for better discrimination
+      // 提取空间网格特征以提高区分度
+      const cellW = iw / this.spatialGridW;
+      const cellH = ih / this.spatialGridH;
+      
+      for (let gy = 0; gy < this.spatialGridH; gy++) {
+        for (let gx = 0; gx < this.spatialGridW; gx++) {
+          const cellStartX = Math.floor(gx * cellW);
+          const cellStartY = Math.floor(gy * cellH);
+          const cellEndX = Math.min(iw, Math.floor((gx + 1) * cellW));
+          const cellEndY = Math.min(ih, Math.floor((gy + 1) * cellH));
+          
+          let cellPixels = 0;
+          let avgR = 0, avgG = 0, avgB = 0, avgV = 0;
+          
+          for (let yy = cellStartY; yy < cellEndY; yy += step) {
+            for (let xx = cellStartX; xx < cellEndX; xx += step) {
+              const p = (yy * iw + xx) * 4;
+              const r = data[p], g = data[p + 1], b = data[p + 2];
+              const { v: V } = rgbToHsv(r, g, b);
+              
+              avgR += r; avgG += g; avgB += b; avgV += V;
+              cellPixels++;
+            }
+          }
+          
+          if (cellPixels > 0) {
+            avgR /= cellPixels; avgG /= cellPixels; avgB /= cellPixels; avgV /= cellPixels;
+          }
+          
+          // Store spatial features: normalized RGB + brightness
+          // 存储空间特征：归一化RGB + 亮度
+          const spatialIdx = (gy * this.spatialGridW + gx) * 4;
+          spatialFeats[spatialIdx] = avgR / 255;
+          spatialFeats[spatialIdx + 1] = avgG / 255;
+          spatialFeats[spatialIdx + 2] = avgB / 255;
+          spatialFeats[spatialIdx + 3] = avgV;
+        }
+      }
+
+      // Combine color and spatial features
+      // 结合颜色和空间特征
+      const combinedFeature = new Float32Array(this.totalDim);
+      combinedFeature.set(hist, 0);
+      combinedFeature.set(spatialFeats, colorDim);
+      
+      return l2normalize(combinedFeature);
     }
 
     /** Compute appearance distance in [0,1] (1 - cosine similarity) */
@@ -170,13 +233,24 @@
         maxHistory: 10
       };
       
-      // Appearance model enhancements
-      // 外观模型增强
+      // Enhanced appearance model for ID consistency in crowded scenes
+      // 针对密集场景ID一致性的增强外观模型
       this.appearanceModel = {
         templates: [], // Multiple appearance templates
         weights: [],   // Template weights
-        maxTemplates: 5,  // Increased template count
-        updateThreshold: 0.6  // Lowered threshold for more adaptive updates
+        maxTemplates: 7,  // Further increased for better discrimination
+        updateThreshold: 0.65,  // Slightly higher for stability
+        discriminativeThreshold: 0.75, // Threshold for high-confidence matches
+        spatialConsistency: true // Enable spatial layout consistency
+      };
+      
+      // ID switching prevention mechanisms
+      // ID切换防护机制
+      this.idConsistency = {
+        recentMatches: [], // Track recent successful matches
+        maxMatchHistory: 10,
+        consistencyThreshold: 0.7, // Minimum consistency score
+        switchPenalty: 0.3 // Penalty for potential ID switches
       };
       
       this._pushTrajectory();
@@ -414,25 +488,74 @@
       }
     }
     
-    /** Get best appearance match score with a feature using weighted ensemble */
-    getAppearanceMatchScore(feature) {
+    /** Enhanced appearance matching with ID consistency checks */
+    getAppearanceMatchScore(feature, candidateDetection = null) {
       if (!feature || this.appearanceModel.templates.length === 0) return 0;
       
-      // Calculate weighted similarities
-      // 计算加权相似度
-      const weightedSimilarities = this.appearanceModel.templates.map((template, idx) => {
+      // Calculate weighted similarities with enhanced discrimination
+      // 计算加权相似度，增强区分能力
+      const similarities = this.appearanceModel.templates.map((template, idx) => {
         const similarity = cosineSimilarity(feature, template);
-        return similarity * this.appearanceModel.weights[idx];
+        return {
+          similarity: similarity,
+          weightedSim: similarity * this.appearanceModel.weights[idx],
+          templateIdx: idx
+        };
       });
       
-      // Use both max and weighted average for robustness
-      // 使用最大值和加权平均以提高鲁棒性
-      const maxSimilarity = Math.max(...weightedSimilarities);
-      const avgSimilarity = weightedSimilarities.reduce((sum, sim) => sum + sim, 0) / weightedSimilarities.length;
+      // Find best matches
+      // 寻找最佳匹配
+      const sortedSims = similarities.sort((a, b) => b.weightedSim - a.weightedSim);
+      const bestMatch = sortedSims[0];
+      const secondBest = sortedSims[1] || { weightedSim: 0 };
       
-      // Combine max and average with preference for max
-      // 结合最大值和平均值，偏向最大值
-      return 0.7 * maxSimilarity + 0.3 * avgSimilarity;
+      // Calculate discrimination ratio - higher is better for unique identification
+      // 计算区分比率 - 越高越有利于唯一识别
+      const discriminationRatio = sortedSims.length > 1 ? 
+        (bestMatch.weightedSim - secondBest.weightedSim) / (bestMatch.weightedSim + 1e-6) : 1.0;
+      
+      // Base similarity score
+      // 基础相似度分数
+      const maxSimilarity = bestMatch.weightedSim;
+      const avgSimilarity = similarities.reduce((sum, sim) => sum + sim.weightedSim, 0) / similarities.length;
+      const baseScore = 0.6 * maxSimilarity + 0.4 * avgSimilarity;
+      
+      // Apply discrimination bonus for highly distinctive matches
+      // 对高区分度匹配应用奖励
+      const discriminationBonus = discriminationRatio > 0.3 ? discriminationRatio * 0.2 : 0;
+      
+      // Check consistency with recent matches for ID stability
+      // 检查与最近匹配的一致性以保持ID稳定性
+      let consistencyBonus = 0;
+      if (this.idConsistency.recentMatches.length > 0) {
+        const recentAvgSim = this.idConsistency.recentMatches
+          .slice(-3) // Last 3 matches
+          .reduce((sum, match) => sum + match.similarity, 0) / Math.min(3, this.idConsistency.recentMatches.length);
+        
+        // Bonus for consistency with recent successful matches
+        // 与最近成功匹配一致性的奖励
+        if (Math.abs(baseScore - recentAvgSim) < 0.2) {
+          consistencyBonus = 0.1;
+        }
+      }
+      
+      const finalScore = Math.min(1.0, baseScore + discriminationBonus + consistencyBonus);
+      
+      // Record this match for consistency tracking
+      // 记录此匹配以进行一致性跟踪
+      this.idConsistency.recentMatches.push({
+        similarity: finalScore,
+        timestamp: Date.now(),
+        templateIdx: bestMatch.templateIdx
+      });
+      
+      // Maintain match history size
+      // 维护匹配历史大小
+      if (this.idConsistency.recentMatches.length > this.idConsistency.maxMatchHistory) {
+        this.idConsistency.recentMatches.shift();
+      }
+      
+      return finalScore;
     }
     
     /** Check if track should enter occlusion state with improved logic */
@@ -479,8 +602,12 @@
       this.wRatio = opts.wRatio ?? 0.05;    // Aspect ratio weight
       this.wMotion = opts.wMotion ?? 0.15;  // Increased motion consistency weight
       
-      this.costThreshold = opts.costThreshold ?? 0.85; // Increased for more permissive matching
-      this.autoCreate = !!opts.autoCreate; // default false: only create via click lock
+      // Adaptive cost thresholds for different scenarios
+      // 针对不同场景的自适应成本阈值
+      this.costThreshold = opts.costThreshold ?? 0.75; // Reduced base threshold for stricter matching
+      this.crowdedSceneThreshold = opts.crowdedSceneThreshold ?? 0.65; // Even stricter for crowded scenes
+      this.lockedTrackThreshold = opts.lockedTrackThreshold ?? 0.85; // More permissive for locked tracks
+      this.autoCreate = !!opts.autoCreate;
       
       // Occlusion handling parameters
       // 遮挡处理参数
@@ -731,11 +858,36 @@
           const finalGatingMultiplier = t.locked ? gatingMultiplier * 1.2 : gatingMultiplier;
           if (i < 0.005 && ctr > gating * finalGatingMultiplier) continue; // Lowered IoU threshold
 
-          // Enhanced appearance matching
+          // Enhanced appearance matching with ID switching prevention
+          // 增强外观匹配，防止ID切换
           let app = 1;
+          let idSwitchPenalty = 0;
+          
           if (this.enableReID && d.feature) {
             if (t.getAppearanceMatchScore && t.appearanceModel && t.appearanceModel.templates.length > 0) {
-              app = 1 - t.getAppearanceMatchScore(d.feature);
+              const matchScore = t.getAppearanceMatchScore(d.feature, d);
+              app = 1 - matchScore;
+              
+              // Apply ID switch penalty for suspicious matches
+              // 对可疑匹配应用ID切换惩罚
+              if (matchScore < t.appearanceModel.discriminativeThreshold) {
+                // Check if this detection might be better matched to another track
+                // 检查此检测是否可能更好地匹配到其他轨迹
+                let betterMatchExists = false;
+                for (const otherTrack of this.tracks) {
+                  if (otherTrack.id !== t.id && otherTrack.getAppearanceMatchScore) {
+                    const otherScore = otherTrack.getAppearanceMatchScore(d.feature, d);
+                    if (otherScore > matchScore + 0.15) { // Significant difference
+                      betterMatchExists = true;
+                      break;
+                    }
+                  }
+                }
+                
+                if (betterMatchExists) {
+                  idSwitchPenalty = t.idConsistency.switchPenalty;
+                }
+              }
             } else if (t.feature) {
               app = clamp(1 - cosineSimilarity(t.feature, d.feature), 0, 1);
             } else {
@@ -798,8 +950,40 @@
             wMotion *= 1.2; // Trust motion model more for stable tracks
           }
 
-          const cost = wIoU * (1 - i) + wApp * app + wCtr * ctrNorm + 
-                      (this.wRatio || 0.03) * ratioDiff + wMotion * motionCost;
+          // Enhanced cost calculation with trajectory consistency and ID switch prevention
+          // 增强成本计算，包含轨迹一致性和ID切换防护
+          
+          // Trajectory consistency check - penalize unrealistic movements
+          // 轨迹一致性检查 - 惩罚不现实的运动
+          let trajConsistencyPenalty = 0;
+          if (t.trajectory.length >= 3) {
+            const recent = t.trajectory.slice(-3);
+            const avgVelX = (recent[2].x - recent[0].x) / 2;
+            const avgVelY = (recent[2].y - recent[0].y) / 2;
+            const expectedX = t.cx + avgVelX;
+            const expectedY = t.cy + avgVelY;
+            
+            const detCenterX = d.x + d.w / 2;
+            const detCenterY = d.y + d.h / 2;
+            const trajDeviation = Math.sqrt((expectedX - detCenterX)**2 + (expectedY - detCenterY)**2);
+            
+            // Penalize large trajectory deviations
+            // 惩罚大的轨迹偏差
+            const maxReasonableDeviation = Math.max(50, Math.hypot(t.w, t.h) * 0.8);
+            if (trajDeviation > maxReasonableDeviation) {
+              trajConsistencyPenalty = Math.min(0.4, trajDeviation / maxReasonableDeviation * 0.2);
+            }
+          }
+          
+          // Size consistency penalty for dramatic size changes
+          // 尺寸一致性惩罚，防止剧烈尺寸变化
+          const sizeChangeRatio = Math.max(d.w/t.w, t.w/d.w) * Math.max(d.h/t.h, t.h/d.h);
+          const sizeConsistencyPenalty = sizeChangeRatio > 2.0 ? Math.min(0.3, (sizeChangeRatio - 2.0) * 0.1) : 0;
+          
+          const baseCost = wIoU * (1 - i) + wApp * app + wCtr * ctrNorm + 
+                          (this.wRatio || 0.03) * ratioDiff + wMotion * motionCost;
+          
+          const cost = baseCost + idSwitchPenalty + trajConsistencyPenalty + sizeConsistencyPenalty;
           
           pairs.push({ cost, ti, di });
         }
@@ -809,18 +993,41 @@
       const usedT = new Set();
       
       for (const p of pairs) {
-        let threshold = this.costThreshold;
         const track = trackList[p.ti];
         
-        // More permissive thresholds for different track states
-        // 针对不同轨迹状态的更宽松阈值
-        if (track.occlusionState && track.occlusionState.isOccluded) threshold *= 1.4;
-        if (track.locked) threshold *= 1.3; // More permissive for locked tracks
+        // Adaptive threshold based on scene complexity and track state
+        // 基于场景复杂度和轨迹状态的自适应阈值
+        let threshold = this.costThreshold;
         
-        // Track age adjustment - newer tracks get stricter thresholds
-        // 轨迹年龄调整 - 新轨迹使用更严格的阈值
-        const trackAge = Math.min(1.0, track.hits / 20);
-        threshold *= (0.9 + 0.2 * trackAge); // Scale from 0.9x to 1.1x based on age
+        // Detect crowded scene based on number of active tracks
+        // 基于活跃轨迹数量检测密集场景
+        const activeTracks = this.tracks.filter(t => t.lostFrames < 5).length;
+        const isCrowdedScene = activeTracks > 8; // More than 8 active tracks = crowded
+        
+        if (isCrowdedScene) {
+          threshold = this.crowdedSceneThreshold; // Stricter threshold for crowded scenes
+        }
+        
+        // Adjust for track-specific states
+        // 根据轨迹特定状态调整
+        if (track.locked) {
+          threshold = Math.max(threshold, this.lockedTrackThreshold); // Use higher threshold for locked tracks
+        }
+        
+        if (track.occlusionState && track.occlusionState.isOccluded) {
+          threshold *= 1.2; // Slightly more permissive for occluded tracks
+        }
+        
+        // Track stability adjustment - stable tracks get slightly more permissive thresholds
+        // 轨迹稳定性调整 - 稳定轨迹获得稍微宽松的阈值
+        const stabilityFactor = Math.min(1.0, (track.hits - track.lostFrames) / Math.max(1, track.hits));
+        const trackAge = Math.min(1.0, track.hits / 30);
+        
+        if (stabilityFactor > 0.8 && trackAge > 0.5) {
+          threshold *= 1.1; // 10% more permissive for very stable tracks
+        } else if (track.hits < 5) {
+          threshold *= 0.9; // 10% stricter for new tracks
+        }
         
         if (p.cost > threshold) break;
         if (usedT.has(p.ti) || !unmatchedDetIdx.has(p.di)) continue;
@@ -834,7 +1041,7 @@
       }
     }
 
-    /** Attempt to recover lost tracks by matching with unmatched detections */
+    /** Enhanced track recovery with ID switching prevention */
     _attemptTrackRecovery(detections, unmatchedDetIdx) {
       // Find tracks that are lost but not yet pruned
       // 找到丢失但尚未被清除的轨迹
@@ -843,6 +1050,17 @@
       );
       
       if (lostTracks.length === 0 || unmatchedDetIdx.size === 0) return;
+      
+      // Prevent recovery if too many tracks are competing for same detections
+      // 如果太多轨迹竞争相同检测则防止恢复
+      const activeTracks = this.tracks.filter(t => t.lostFrames < 3).length;
+      const isCrowdedScene = activeTracks > 6;
+      
+      if (isCrowdedScene && lostTracks.length > unmatchedDetIdx.size * 2) {
+        // In crowded scenes, be more conservative about recovery
+        // 在密集场景中，对恢复更加保守
+        return;
+      }
       
       const recoveryPairs = [];
       
@@ -885,9 +1103,35 @@
           const distanceScore = Math.exp(-distance / 50); // Exponential decay
           const recoveryScore = 0.4 * distanceScore + 0.4 * appearanceScore + 0.2 * sizeRatio;
           
-          // Higher threshold for locked tracks (more permissive)
-          // 锁定轨迹的更高阈值（更宽松）
-          const recoveryThreshold = track.locked ? 0.4 : 0.6;
+          // Adaptive recovery threshold based on scene complexity
+          // 基于场景复杂度的自适应恢复阈值
+          const activeTracks = this.tracks.filter(t => t.lostFrames < 5).length;
+          const isCrowdedScene = activeTracks > 8;
+          
+          let recoveryThreshold = track.locked ? 0.5 : 0.65;
+          if (isCrowdedScene) {
+            recoveryThreshold += 0.15; // Stricter in crowded scenes
+          }
+          
+          // Additional check: ensure this detection isn't better suited for an active track
+          // 额外检查：确保此检测不更适合活跃轨迹
+          let conflictingActiveTrack = false;
+          for (const activeTrack of this.tracks) {
+            if (activeTrack.lostFrames < 3 && activeTrack.id !== track.id) {
+              const activeDistance = Math.sqrt(
+                (activeTrack.cx - (det.x + det.w/2))**2 + 
+                (activeTrack.cy - (det.y + det.h/2))**2
+              );
+              if (activeDistance < pair.distance * 0.7) { // Active track is much closer
+                conflictingActiveTrack = true;
+                break;
+              }
+            }
+          }
+          
+          if (conflictingActiveTrack) {
+            recoveryThreshold += 0.2; // Much stricter if conflicts with active tracks
+          }
           
           if (recoveryScore > recoveryThreshold) {
             recoveryPairs.push({
@@ -962,8 +1206,30 @@
       }
     }
 
-    /** Create track from detection */
+    /** Enhanced track creation with ID conflict prevention */
     _createTrackFromDet(d, feature, locked) {
+      // Check for potential ID conflicts in crowded scenes
+      // 在密集场景中检查潜在的ID冲突
+      const activeTracks = this.tracks.filter(t => t.lostFrames < 5).length;
+      const isCrowdedScene = activeTracks > 8;
+      
+      if (isCrowdedScene && !locked) {
+        // In crowded scenes, be more conservative about creating new tracks
+        // 在密集场景中，对创建新轨迹更加保守
+        const nearbyTracks = this.tracks.filter(t => {
+          const distance = Math.sqrt(
+            (t.cx - (d.x + d.w/2))**2 + 
+            (t.cy - (d.y + d.h/2))**2
+          );
+          return distance < Math.max(d.w, d.h) * 1.5;
+        });
+        
+        if (nearbyTracks.length > 0) {
+          console.log(`Skipping track creation in crowded scene - ${nearbyTracks.length} nearby tracks`);
+          return null;
+        }
+      }
+      
       const id = this.nextId++;
       const t = new Track(id, { x: d.x, y: d.y, w: d.w, h: d.h }, { locked });
       if (feature) t.feature = feature;
@@ -971,6 +1237,8 @@
       // 存储对象类别信息用于显示
       t.class = d.class || 'object';
       this.tracks.push(t);
+      
+      console.log(`Created new track ${id} (locked: ${locked}, crowded: ${isCrowdedScene})`);
       return id;
     }
 
