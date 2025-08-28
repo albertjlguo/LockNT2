@@ -137,7 +137,8 @@ def video_feed_mjpeg():
                     frame_gap = current_frame_id - last_frame_id
                     if frame_gap > 1 and frame_skip_count < max_skip_frames:
                         frame_skip_count += 1
-                        time.sleep(0.003)  # Very short delay
+                        # Remove blocking sleep to prevent worker timeout
+                        # 移除阻塞性sleep以防止worker超时
                         continue
                     
                     frame_skip_count = 0
@@ -155,15 +156,21 @@ def video_feed_mjpeg():
                            b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
                            b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
                 else:
-                    # Dynamic sleep adjustment based on frame availability
-                    # 基于帧可用性的动态休眠调整
-                    time.sleep(0.003)  # Minimal sleep for high responsiveness
+                    # Non-blocking frame waiting - yield control instead of sleep
+                    # 非阻塞帧等待 - 让出控制权而非休眠
+                    # Use a very short yield to prevent busy waiting while avoiding worker timeout
+                    # 使用极短的让出以防止忙等待，同时避免worker超时
+                    import threading
+                    threading.Event().wait(0.001)  # Non-blocking minimal wait
                     
             except GeneratorExit:
                 break
             except Exception as e:
                 logging.error(f"Error in enhanced MJPEG generator: {e}")
-                time.sleep(0.01)  # Brief recovery pause
+                # Use non-blocking recovery pause to prevent worker timeout
+                # 使用非阻塞恢复暂停以防止worker超时
+                import threading
+                threading.Event().wait(0.005)  # Brief non-blocking recovery pause
 
     return Response(generate(), 
                     mimetype='multipart/x-mixed-replace; boundary=frame',
