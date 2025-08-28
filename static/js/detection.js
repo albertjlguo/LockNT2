@@ -13,11 +13,24 @@ class ObjectDetectionManager {
             recentDetections: []
         };
         
-        // Configurable confidence thresholds (aligned with backend tracker values)
-        // 可配置的置信度阈值（与后端追踪器数值对齐）
+        // Enhanced confidence thresholds with dynamic adjustment
+        // 增强的置信度阈值，支持动态调整
         this.confidenceThresholds = {
-            person: 0.5,   // 50% - Aligned with tracker detectHigh
-            car: 0.5       // 50% - Aligned with tracker detectHigh
+            person: 0.45,   // Lowered for better person detection
+            car: 0.55,      // Slightly higher for more accurate car detection
+            // Dynamic thresholds based on object size
+            // 基于目标大小的动态阈值
+            getThreshold: (className, objectSize, imageArea) => {
+                const baseThreshold = this.confidenceThresholds[className] || 0.5;
+                const sizeRatio = objectSize / imageArea;
+                
+                // Adjust threshold based on object size
+                // 根据目标大小调整阈值
+                if (sizeRatio < 0.005) return Math.max(0.3, baseThreshold - 0.15); // Very small objects
+                if (sizeRatio < 0.02) return Math.max(0.35, baseThreshold - 0.1);  // Small objects
+                if (sizeRatio > 0.25) return Math.min(0.8, baseThreshold + 0.1);   // Large objects
+                return baseThreshold;
+            }
         };
         
         // Previous detections for temporal smoothing
@@ -204,34 +217,54 @@ class ObjectDetectionManager {
                 return null;
             }
             
-            // Apply adaptive confidence filtering based on object size and context
-            // 应用基于目标大小和上下文的自适应置信度过滤
-            const baseConfidence = this.confidenceThresholds[pred.class] || 0.3;
+            // Enhanced adaptive confidence filtering with improved accuracy
+            // 增强的自适应置信度过滤，提高准确性
             const objectSize = pred.bbox[2] * pred.bbox[3];
             const imageArea = imageWidth * imageHeight;
-            const sizeRatio = objectSize / imageArea;
             
-            // Adaptive threshold based on object size relative to image
-            // 基于目标相对于图像大小的自适应阈值
-            let sizeAdjustment = 0;
-            if (sizeRatio < 0.01) { // Very small objects
-                sizeAdjustment = -0.1;
-            } else if (sizeRatio < 0.05) { // Small objects
-                sizeAdjustment = -0.05;
-            } else if (sizeRatio > 0.3) { // Large objects
-                sizeAdjustment = 0.05;
+            // Use dynamic threshold calculation
+            // 使用动态阈值计算
+            const minConfidence = this.confidenceThresholds.getThreshold(pred.class, objectSize, imageArea);
+            
+            // Additional context-based adjustments
+            // 额外的基于上下文的调整
+            let contextAdjustment = 0;
+            const aspectRatio = pred.bbox[2] / pred.bbox[3];
+            
+            // Class-specific aspect ratio validation
+            // 类别特定的宽高比验证
+            if (pred.class === 'person') {
+                // Persons should typically be taller than wide
+                // 人物通常应该比宽度更高
+                if (aspectRatio > 1.2) contextAdjustment -= 0.1; // Penalize wide person boxes
+                if (aspectRatio < 0.3) contextAdjustment -= 0.05; // Penalize very narrow boxes
+            } else if (pred.class === 'car') {
+                // Cars should typically be wider than tall
+                // 汽车通常应该比高度更宽
+                if (aspectRatio < 0.8) contextAdjustment -= 0.1; // Penalize tall car boxes
+                if (aspectRatio > 4.0) contextAdjustment -= 0.05; // Penalize very wide boxes
             }
             
-            const minConfidence = Math.max(0.15, baseConfidence + sizeAdjustment);
+            const finalMinConfidence = Math.max(0.2, minConfidence + contextAdjustment);
             
-            if (pred.score < minConfidence) return null;
+            if (pred.score < finalMinConfidence) return null;
             
-            // Enhanced coordinate validation and intelligent clamping
-            // 增强的坐标验证和智能钳制
+            // Enhanced coordinate validation with scaling awareness
+            // 增强的坐标验证，考虑缩放因子
             const [x, y, w, h] = pred.bbox;
             
-            // Check for invalid coordinates
-            // 检查无效坐标
+            // Get display dimensions for proper scaling
+            // 获取显示尺寸以进行正确缩放
+            const displayWidth = videoElement.width || videoElement.clientWidth || 640;
+            const displayHeight = videoElement.height || videoElement.clientHeight || 480;
+            
+            // Calculate scaling factors between natural and display size
+            // 计算自然尺寸和显示尺寸之间的缩放因子
+            const scaleX = imageWidth / displayWidth;
+            const scaleY = imageHeight / displayHeight;
+            
+            // Check for invalid coordinates with scaling consideration
+            // 检查无效坐标，考虑缩放
             let needsClamping = false;
             if (x < 0 || y < 0 || w <= 0 || h <= 0 || 
                 x + w > imageWidth || y + h > imageHeight) {
@@ -239,8 +272,8 @@ class ObjectDetectionManager {
             }
             
             if (needsClamping) {
-                // Intelligent clamping that preserves aspect ratio when possible
-                // 智能钳制，尽可能保持宽高比
+                // Enhanced intelligent clamping with aspect ratio preservation
+                // 增强的智能钳制，保持宽高比
                 const originalAspectRatio = w / h;
                 
                 // Calculate maximum possible dimensions within image bounds
@@ -253,37 +286,66 @@ class ObjectDetectionManager {
                 let clampedW = Math.max(1, Math.min(w, maxW));
                 let clampedH = Math.max(1, Math.min(h, maxH));
                 
-                // Try to preserve aspect ratio
-                // 尝试保持宽高比
-                if (clampedW / clampedH > originalAspectRatio * 1.2) {
-                    // Width is too large relative to height
-                    // 宽度相对于高度过大
-                    clampedW = clampedH * originalAspectRatio;
-                } else if (clampedH / clampedW > (1/originalAspectRatio) * 1.2) {
-                    // Height is too large relative to width
-                    // 高度相对于宽度过大
-                    clampedH = clampedW / originalAspectRatio;
+                // Enhanced aspect ratio preservation with class-specific constraints
+                // 增强的宽高比保持，使用类别特定约束
+                const expectedRatios = {
+                    'person': { min: 0.3, max: 0.8, typical: 0.5 },
+                    'car': { min: 1.5, max: 3.5, typical: 2.2 }
+                };
+                
+                const classRatio = expectedRatios[pred.class];
+                if (classRatio) {
+                    const currentRatio = clampedW / clampedH;
+                    
+                    // Adjust to fit within expected ratio range
+                    // 调整以适应预期的比例范围
+                    if (currentRatio < classRatio.min) {
+                        // Too narrow - expand width or reduce height
+                        // 太窄 - 扩展宽度或减少高度
+                        const targetW = clampedH * classRatio.min;
+                        if (targetW <= maxW) {
+                            clampedW = targetW;
+                        } else {
+                            clampedH = clampedW / classRatio.min;
+                        }
+                    } else if (currentRatio > classRatio.max) {
+                        // Too wide - reduce width or expand height
+                        // 太宽 - 减少宽度或扩展高度
+                        const targetH = clampedW / classRatio.max;
+                        if (targetH <= maxH) {
+                            clampedH = targetH;
+                        } else {
+                            clampedW = clampedH * classRatio.max;
+                        }
+                    }
                 }
                 
-                // Final bounds check
-                // 最终边界检查
+                // Final bounds check with stricter validation
+                // 最终边界检查，更严格的验证
                 clampedW = Math.max(1, Math.min(clampedW, maxW));
                 clampedH = Math.max(1, Math.min(clampedH, maxH));
                 
                 pred.bbox = [maxX, maxY, clampedW, clampedH];
                 
-                // Add quality penalty for heavily clamped detections
-                // 为严重钳制的检测添加质量惩罚
+                // Enhanced quality penalty calculation
+                // 增强的质量惩罚计算
                 const clampingPenalty = Math.max(
-                    Math.abs(x - maxX) / w,
-                    Math.abs(y - maxY) / h,
-                    Math.abs(w - clampedW) / w,
-                    Math.abs(h - clampedH) / h
+                    Math.abs(x - maxX) / Math.max(w, 1),
+                    Math.abs(y - maxY) / Math.max(h, 1),
+                    Math.abs(w - clampedW) / Math.max(w, 1),
+                    Math.abs(h - clampedH) / Math.max(h, 1)
                 );
                 
-                if (clampingPenalty > 0.3) {
-                    pred.score *= (1 - clampingPenalty * 0.3); // Reduce confidence for heavily modified boxes
+                // More aggressive penalty for heavily modified boxes
+                // 对严重修改的框施加更严厉的惩罚
+                if (clampingPenalty > 0.2) {
+                    pred.score *= (1 - clampingPenalty * 0.4);
                 }
+                
+                // Mark as clamped for tracking system awareness
+                // 标记为已钳制，供追踪系统感知
+                pred.wasClamped = true;
+                pred.clampingPenalty = clampingPenalty;
             }
             
             // Apply minimal bounding box optimization to preserve accuracy
@@ -303,12 +365,21 @@ class ObjectDetectionManager {
             return {
                 ...pred,
                 bbox: finalBbox,
-                // Store original image dimensions for scaling reference
-                // 存储原始图像尺寸作为缩放参考
+                // Store comprehensive metadata for tracking and scaling
+                // 存储用于追踪和缩放的综合元数据
                 originalImageSize: { width: imageWidth, height: imageHeight },
-                // Add stability score for tracking
-                // 添加用于追踪的稳定性分数
-                stability: this.calculateStabilityScore(pred.score, pred.class)
+                displaySize: { width: displayWidth, height: displayHeight },
+                scalingFactors: { x: scaleX, y: scaleY },
+                // Enhanced stability score with accuracy factors
+                // 增强的稳定性分数，包含准确性因子
+                stability: this.calculateStabilityScore(pred.score, pred.class),
+                // Add accuracy metrics
+                // 添加准确性指标
+                accuracyMetrics: {
+                    aspectRatioValid: this.validateAspectRatio(finalBbox, pred.class),
+                    sizeReasonable: this.validateObjectSize(finalBbox, imageWidth, imageHeight),
+                    positionValid: this.validatePosition(finalBbox, imageWidth, imageHeight)
+                }
             };
         }).filter(pred => pred !== null);
     }
@@ -327,71 +398,97 @@ class ObjectDetectionManager {
             return bbox; // Return original if invalid
         }
         
-        // Enhanced optimization based on confidence and object characteristics
-        // 基于置信度和目标特征的增强优化
+        // Enhanced optimization with stricter accuracy controls
+        // 增强优化，更严格的准确性控制
         let adjustmentFactor = 1.0;
         let paddingRatio = 0.0;
         
-        // Confidence-based adjustments
-        // 基于置信度的调整
-        if (confidence < 0.6) {
-            // Lower confidence detections get slight tightening
-            // 低置信度检测稍微收紧
-            adjustmentFactor = 0.95;
-        } else if (confidence > 0.8) {
-            // High confidence detections get slight expansion for completeness
-            // 高置信度检测稍微扩展以确保完整性
-            adjustmentFactor = 1.02;
-            paddingRatio = 0.01;
+        // More conservative confidence-based adjustments
+        // 更保守的基于置信度的调整
+        if (confidence < 0.5) {
+            // Lower confidence detections get moderate tightening
+            // 低置信度检测适度收紧
+            adjustmentFactor = 0.92;
+        } else if (confidence > 0.85) {
+            // Only very high confidence detections get expansion
+            // 只有非常高置信度的检测才扩展
+            adjustmentFactor = 1.01;
+            paddingRatio = 0.005;
         }
         
-        // Class-specific optimizations
-        // 类别特定优化
+        // More precise class-specific optimizations
+        // 更精确的类别特定优化
+        const aspectRatio = width / height;
         switch (objectClass) {
             case 'person':
-                // Persons often need slight vertical expansion for full body
-                // 人物通常需要轻微的垂直扩展以包含全身
-                if (height / width > 1.5) { // Likely full body
-                    adjustmentFactor *= 1.01;
-                    paddingRatio += 0.005;
+                // Validate person aspect ratio and adjust accordingly
+                // 验证人物宽高比并相应调整
+                if (aspectRatio > 0.3 && aspectRatio < 0.8 && height / width > 1.2) {
+                    // Valid person proportions - minimal adjustment
+                    // 有效的人物比例 - 最小调整
+                    adjustmentFactor *= 1.005;
+                } else if (aspectRatio > 1.0) {
+                    // Unusually wide person box - tighten
+                    // 异常宽的人物框 - 收紧
+                    adjustmentFactor *= 0.95;
                 }
                 break;
             case 'car':
-                // Cars benefit from slight horizontal expansion
-                // 汽车受益于轻微的水平扩展
-                if (width / height > 1.8) { // Likely side view
-                    adjustmentFactor *= 1.01;
-                    paddingRatio += 0.005;
+                // Validate car aspect ratio
+                // 验证汽车宽高比
+                if (aspectRatio > 1.5 && aspectRatio < 3.5) {
+                    // Valid car proportions - minimal adjustment
+                    // 有效的汽车比例 - 最小调整
+                    adjustmentFactor *= 1.005;
+                } else if (aspectRatio < 1.0) {
+                    // Unusually tall car box - tighten
+                    // 异常高的汽车框 - 收紧
+                    adjustmentFactor *= 0.95;
                 }
                 break;
         }
         
-        // Apply size-based adjustments
-        // 应用基于大小的调整
+        // More conservative size-based adjustments
+        // 更保守的基于大小的调整
         const objectArea = width * height;
-        if (objectArea < 2000) { // Small objects
-            adjustmentFactor *= 1.05; // Slight expansion for small objects
-            paddingRatio += 0.02;
-        } else if (objectArea > 50000) { // Large objects
-            adjustmentFactor *= 0.98; // Slight tightening for large objects
+        if (objectArea < 1500) { // Very small objects
+            adjustmentFactor *= 1.03; // Moderate expansion for very small objects
+            paddingRatio += 0.01;
+        } else if (objectArea > 80000) { // Very large objects
+            adjustmentFactor *= 0.99; // Minimal tightening for very large objects
         }
         
-        // Calculate optimized dimensions
-        // 计算优化后的尺寸
+        // Calculate optimized dimensions with precision preservation
+        // 计算优化后的尺寸，保持精度
         const centerX = x + width / 2;
         const centerY = y + height / 2;
+        
+        // Apply adjustments more conservatively
+        // 更保守地应用调整
         const newWidth = width * adjustmentFactor;
         const newHeight = height * adjustmentFactor;
         
-        // Add padding for stability
-        // 添加填充以提高稳定性
+        // Minimal padding to avoid over-expansion
+        // 最小填充以避免过度扩展
         const paddedWidth = newWidth * (1 + paddingRatio);
         const paddedHeight = newHeight * (1 + paddingRatio);
         
-        // Ensure the adjusted bbox doesn't go negative
-        // 确保调整后的边界框不为负数
+        // Ensure the adjusted bbox stays within reasonable bounds
+        // 确保调整后的边界框保持在合理范围内
         const finalX = Math.max(0, centerX - paddedWidth / 2);
         const finalY = Math.max(0, centerY - paddedHeight / 2);
+        
+        // Additional validation to prevent extreme adjustments
+        // 额外验证以防止极端调整
+        const maxAllowedChange = 0.15; // Maximum 15% change
+        const widthChange = Math.abs(paddedWidth - width) / width;
+        const heightChange = Math.abs(paddedHeight - height) / height;
+        
+        if (widthChange > maxAllowedChange || heightChange > maxAllowedChange) {
+            // If adjustment is too large, use original bbox
+            // 如果调整过大，使用原始边界框
+            return bbox;
+        }
         
         return [
             finalX,
@@ -419,6 +516,54 @@ class ObjectDetectionManager {
         
         const multiplier = classMultipliers[objectClass] || 0.85;
         return Math.min(1.0, stability * multiplier);
+    }
+    
+    /**
+     * Validate aspect ratio for object class
+     * 验证目标类别的宽高比
+     */
+    validateAspectRatio(bbox, objectClass) {
+        const [x, y, w, h] = bbox;
+        const aspectRatio = w / h;
+        
+        const validRanges = {
+            'person': { min: 0.25, max: 0.9 },
+            'car': { min: 1.2, max: 4.0 }
+        };
+        
+        const range = validRanges[objectClass];
+        if (!range) return true; // Unknown class, assume valid
+        
+        return aspectRatio >= range.min && aspectRatio <= range.max;
+    }
+    
+    /**
+     * Validate object size reasonableness
+     * 验证目标大小的合理性
+     */
+    validateObjectSize(bbox, imageWidth, imageHeight) {
+        const [x, y, w, h] = bbox;
+        const objectArea = w * h;
+        const imageArea = imageWidth * imageHeight;
+        const sizeRatio = objectArea / imageArea;
+        
+        // Object should be between 0.1% and 80% of image area
+        // 目标应该在图像面积的0.1%到80%之间
+        return sizeRatio >= 0.001 && sizeRatio <= 0.8;
+    }
+    
+    /**
+     * Validate object position
+     * 验证目标位置
+     */
+    validatePosition(bbox, imageWidth, imageHeight) {
+        const [x, y, w, h] = bbox;
+        
+        // Check if bbox is completely within image bounds
+        // 检查边界框是否完全在图像边界内
+        return x >= 0 && y >= 0 && 
+               x + w <= imageWidth && y + h <= imageHeight &&
+               w > 0 && h > 0;
     }
 
     /**
@@ -574,6 +719,70 @@ class ObjectDetectionManager {
             .map(word => word.charAt(0).toUpperCase() + word.slice(1))
             .join(' ');
     }
+    
+    /**
+     * Enhanced coordinate scaling for different display contexts
+     * 针对不同显示上下文的增强坐标缩放
+     */
+    scaleCoordinatesForDisplay(bbox, fromSize, toSize) {
+        const [x, y, w, h] = bbox;
+        const scaleX = toSize.width / fromSize.width;
+        const scaleY = toSize.height / fromSize.height;
+        
+        return [
+            x * scaleX,
+            y * scaleY,
+            w * scaleX,
+            h * scaleY
+        ];
+    }
+    
+    /**
+     * Validate and correct detection coordinates for accuracy
+     * 验证并修正检测坐标以提高准确性
+     */
+    validateAndCorrectCoordinates(detection, imageWidth, imageHeight) {
+        const [x, y, w, h] = detection.bbox;
+        
+        // Check for common coordinate errors
+        // 检查常见的坐标错误
+        let correctedBbox = [x, y, w, h];
+        let needsCorrection = false;
+        
+        // Fix negative coordinates
+        // 修复负坐标
+        if (x < 0) {
+            correctedBbox[2] = Math.max(1, w + x); // Adjust width
+            correctedBbox[0] = 0;
+            needsCorrection = true;
+        }
+        if (y < 0) {
+            correctedBbox[3] = Math.max(1, h + y); // Adjust height
+            correctedBbox[1] = 0;
+            needsCorrection = true;
+        }
+        
+        // Fix out-of-bounds coordinates
+        // 修复超出边界的坐标
+        if (correctedBbox[0] + correctedBbox[2] > imageWidth) {
+            correctedBbox[2] = Math.max(1, imageWidth - correctedBbox[0]);
+            needsCorrection = true;
+        }
+        if (correctedBbox[1] + correctedBbox[3] > imageHeight) {
+            correctedBbox[3] = Math.max(1, imageHeight - correctedBbox[1]);
+            needsCorrection = true;
+        }
+        
+        if (needsCorrection) {
+            detection.bbox = correctedBbox;
+            detection.wasCorrected = true;
+            // Reduce confidence for corrected detections
+            // 降低修正检测的置信度
+            detection.score *= 0.9;
+        }
+        
+        return detection;
+    }
 
     /**
      * Add a callback for detection events
@@ -622,8 +831,8 @@ class ObjectDetectionManager {
     }
     
     /**
-     * Apply temporal smoothing to reduce detection jitter
-     * 应用时间平滑以减少检测抖动
+     * Apply enhanced temporal smoothing to reduce detection jitter with improved accuracy
+     * 应用增强的时间平滑以减少检测抖动，提高准确性
      */
     applyTemporalSmoothing(currentDetections, previousDetections) {
         if (!previousDetections || previousDetections.length === 0) {
@@ -631,14 +840,38 @@ class ObjectDetectionManager {
         }
         
         return currentDetections.map(current => {
-            // Find closest previous detection
-            // 找到最接近的先前检测
+            // Find closest previous detection with stricter matching
+            // 找到最接近的先前检测，使用更严格的匹配
             const closest = this.findClosestDetection(current, previousDetections);
             
-            if (closest && this.calculateIoU(current.bbox, closest.bbox) > 0.3) {
-                // Apply smoothing to reduce jitter
-                // 应用平滑以减少抖动
-                const smoothingFactor = 0.3;
+            if (closest && this.calculateIoU(current.bbox, closest.bbox) > 0.4) {
+                // Apply adaptive smoothing based on confidence and movement
+                // 基于置信度和移动应用自适应平滑
+                const confidenceRatio = current.score / closest.score;
+                const movementDistance = this.calculateCenterDistance(current.bbox, closest.bbox);
+                const maxDimension = Math.max(current.bbox[2], current.bbox[3]);
+                const normalizedMovement = movementDistance / maxDimension;
+                
+                // Adjust smoothing factor based on confidence and movement
+                // 根据置信度和移动调整平滑因子
+                let smoothingFactor = 0.2; // More conservative base smoothing
+                
+                if (confidenceRatio > 1.2) {
+                    // Current detection is much more confident
+                    // 当前检测置信度更高
+                    smoothingFactor = 0.1;
+                } else if (confidenceRatio < 0.8) {
+                    // Previous detection was more confident
+                    // 先前检测置信度更高
+                    smoothingFactor = 0.3;
+                }
+                
+                if (normalizedMovement > 0.3) {
+                    // Large movement - reduce smoothing
+                    // 大幅移动 - 减少平滑
+                    smoothingFactor *= 0.5;
+                }
+                
                 const [cx, cy, cw, ch] = current.bbox;
                 const [px, py, pw, ph] = closest.bbox;
                 
@@ -649,7 +882,14 @@ class ObjectDetectionManager {
                         cy * (1 - smoothingFactor) + py * smoothingFactor,
                         cw * (1 - smoothingFactor) + pw * smoothingFactor,
                         ch * (1 - smoothingFactor) + ph * smoothingFactor
-                    ]
+                    ],
+                    // Add smoothing metadata
+                    // 添加平滑元数据
+                    smoothingInfo: {
+                        factor: smoothingFactor,
+                        confidenceRatio: confidenceRatio,
+                        movement: normalizedMovement
+                    }
                 };
             }
             
@@ -684,7 +924,12 @@ class ObjectDetectionManager {
             }
         }
         
-        return minDistance < 100 ? closest : null; // Max 100px distance
+        // Adaptive distance threshold based on object size
+        // 基于目标大小的自适应距离阈值
+        const maxDimension = Math.max(target.bbox[2], target.bbox[3]);
+        const adaptiveThreshold = Math.min(100, maxDimension * 0.5);
+        
+        return minDistance < adaptiveThreshold ? closest : null;
     }
     
     /**
@@ -718,10 +963,10 @@ class ObjectDetectionManager {
     }
     
     /**
-     * Apply Non-Maximum Suppression to remove overlapping detections
-     * 应用非极大值抑制移除重叠检测
+     * Apply Non-Maximum Suppression to remove overlapping detections with improved accuracy
+     * 应用非极大值抑制移除重叠检测，提高准确性
      */
-    applyNonMaxSuppression(detections, iouThreshold = 0.5) {
+    applyNonMaxSuppression(detections, iouThreshold = 0.4) {
         if (!detections || detections.length === 0) return [];
         
         // Group detections by class
@@ -762,8 +1007,20 @@ class ObjectDetectionManager {
                     const otherDet = classDetections[j];
                     const iou = this.calculateIoU(currentDet.bbox, otherDet.bbox);
                     
+                    // Enhanced suppression logic with size and confidence consideration
+                    // 增强的抑制逻辑，考虑大小和置信度
                     if (iou > iouThreshold) {
-                        suppressed.add(j);
+                        // Additional check: suppress smaller box if confidence difference is small
+                        // 额外检查：如果置信度差异小，抑制较小的框
+                        const confidenceDiff = currentDet.score - otherDet.score;
+                        const currentArea = currentDet.bbox[2] * currentDet.bbox[3];
+                        const otherArea = otherDet.bbox[2] * otherDet.bbox[3];
+                        
+                        if (confidenceDiff < 0.1 && otherArea < currentArea * 0.8) {
+                            suppressed.add(j); // Suppress smaller, similar-confidence detection
+                        } else if (confidenceDiff >= 0.1) {
+                            suppressed.add(j); // Suppress lower confidence detection
+                        }
                     }
                 }
             }
