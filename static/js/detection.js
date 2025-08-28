@@ -13,11 +13,11 @@ class ObjectDetectionManager {
             recentDetections: []
         };
         
-        // Configurable confidence thresholds (lowered for better detection)
-        // 可配置的置信度阈值（降低以提高检测率）
+        // Configurable confidence thresholds (aligned with backend tracker values)
+        // 可配置的置信度阈值（与后端追踪器数值对齐）
         this.confidenceThresholds = {
-            person: 0.35,  // 35% - Lower for better person detection
-            car: 0.4       // 40% - Slightly lower for cars
+            person: 0.5,   // 50% - Aligned with tracker detectHigh
+            car: 0.5       // 50% - Aligned with tracker detectHigh
         };
         
         // Previous detections for temporal smoothing
