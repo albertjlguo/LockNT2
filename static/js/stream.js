@@ -614,14 +614,7 @@ class StreamManager {
             const [x, y, width, height] = prediction.bbox;
             const confidence = (prediction.score * 100).toFixed(1);
             
-            // Scale coordinates to canvas size (assuming detection was done on the displayed image)
-            const scaleX = this.detectionCanvas.width / (this.frameImage?.naturalWidth || this.detectionCanvas.width);
-            const scaleY = this.detectionCanvas.height / (this.frameImage?.naturalHeight || this.detectionCanvas.height);
-            
-            const scaledX = x * scaleX;
-            const scaledY = y * scaleY;
-            const scaledWidth = width * scaleX;
-            const scaledHeight = height * scaleY;
+            const [scaledX, scaledY, scaledWidth, scaledHeight] = [x, y, width, height];
 
             // Draw bounding box
             this.detectionContext.strokeStyle = '#471580';
