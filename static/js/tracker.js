@@ -74,6 +74,166 @@
     return { h, s, v };
   }
 
+  // ----------------------- Hungarian Algorithm --------------------------
+  /**
+   * Hungarian Algorithm for optimal assignment in tracking
+   * 匈牙利算法用于追踪中的最优分配
+   */
+  class HungarianAlgorithm {
+    constructor() {
+      this.INF = 1e9;
+    }
+
+    /**
+     * Solve assignment problem using Hungarian algorithm
+     * 使用匈牙利算法解决分配问题
+     * @param {number[][]} costMatrix - Cost matrix where costMatrix[i][j] is cost of assigning row i to column j
+     * @returns {number[]} - Assignment array where result[i] is the column assigned to row i (-1 if unassigned)
+     */
+    solve(costMatrix) {
+      if (!costMatrix || costMatrix.length === 0) return [];
+      
+      const n = costMatrix.length;
+      const m = costMatrix[0].length;
+      
+      // Pad matrix to be square
+      // 填充矩阵使其为方阵
+      const size = Math.max(n, m);
+      const matrix = Array(size).fill().map(() => Array(size).fill(this.INF));
+      
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < m; j++) {
+          matrix[i][j] = costMatrix[i][j];
+        }
+      }
+      
+      // Hungarian algorithm implementation
+      // 匈牙利算法实现
+      const u = Array(size + 1).fill(0);
+      const v = Array(size + 1).fill(0);
+      const p = Array(size + 1).fill(0);
+      const way = Array(size + 1).fill(0);
+      
+      for (let i = 1; i <= size; i++) {
+        p[0] = i;
+        let j0 = 0;
+        const minv = Array(size + 1).fill(this.INF);
+        const used = Array(size + 1).fill(false);
+        
+        do {
+          used[j0] = true;
+          const i0 = p[j0];
+          let delta = this.INF;
+          let j1 = 0;
+          
+          for (let j = 1; j <= size; j++) {
+            if (!used[j]) {
+              const cur = matrix[i0 - 1][j - 1] - u[i0] - v[j];
+              if (cur < minv[j]) {
+                minv[j] = cur;
+                way[j] = j0;
+              }
+              if (minv[j] < delta) {
+                delta = minv[j];
+                j1 = j;
+              }
+            }
+          }
+          
+          for (let j = 0; j <= size; j++) {
+            if (used[j]) {
+              u[p[j]] += delta;
+              v[j] -= delta;
+            } else {
+              minv[j] -= delta;
+            }
+          }
+          
+          j0 = j1;
+        } while (p[j0] !== 0);
+        
+        do {
+          const j1 = way[j0];
+          p[j0] = p[j1];
+          j0 = j1;
+        } while (j0);
+      }
+      
+      // Extract assignment results
+      // 提取分配结果
+      const result = Array(n).fill(-1);
+      for (let j = 1; j <= size; j++) {
+        const i = p[j] - 1;
+        if (i >= 0 && i < n && j - 1 < m && matrix[i][j - 1] < this.INF) {
+          result[i] = j - 1;
+        }
+      }
+      
+      return result;
+    }
+  }
+
+  // ----------------------- ID Manager --------------------------
+  /**
+   * ID Manager to prevent ID reuse and conflicts
+   * ID管理器，防止ID重用和冲突
+   */
+  class IDManager {
+    constructor() {
+      this.usedIDs = new Set();
+      this.nextID = 1;
+      this.releasedIDs = new Map(); // ID -> release timestamp
+      this.reuseDelay = 5000; // 5 seconds delay before ID can be reused
+    }
+
+    /**
+     * Allocate a new unique ID
+     * 分配新的唯一ID
+     * @returns {number} - New unique ID
+     */
+    allocateID() {
+      // Clean up old released IDs
+      // 清理旧的已释放ID
+      const now = Date.now();
+      for (const [id, releaseTime] of this.releasedIDs.entries()) {
+        if (now - releaseTime > this.reuseDelay) {
+          this.usedIDs.delete(id);
+          this.releasedIDs.delete(id);
+        }
+      }
+      
+      // Find next available ID
+      // 找到下一个可用ID
+      while (this.usedIDs.has(this.nextID)) {
+        this.nextID++;
+      }
+      
+      this.usedIDs.add(this.nextID);
+      return this.nextID++;
+    }
+
+    /**
+     * Release an ID for future reuse (with delay)
+     * 释放ID以供将来重用（有延迟）
+     * @param {number} id - ID to release
+     */
+    releaseID(id) {
+      if (this.usedIDs.has(id)) {
+        this.releasedIDs.set(id, Date.now());
+      }
+    }
+
+    /**
+     * Check if an ID is currently in use
+     * 检查ID是否正在使用
+     * @param {number} id - ID to check
+     * @returns {boolean} - True if ID is in use
+     */
+    isIDInUse(id) {
+      return this.usedIDs.has(id) && !this.releasedIDs.has(id);
+    }
+  }
+
   // ----------------------- Appearance Encoder --------------------------
   /**
    * Enhanced HSV histogram encoder with spatial information for better discrimination
@@ -584,7 +744,8 @@
   class Tracker {
     constructor(opts = {}) {
       this.tracks = [];
-      this.nextId = 1;
+      this.idManager = new IDManager(); // Use ID manager instead of simple counter
+      this.hungarian = new HungarianAlgorithm(); // Hungarian algorithm for optimal assignment
       this.encoder = new AppearanceEncoder(opts.encoder || {});
       this.enableReID = opts.enableReID !== false; // default true
       this.focusClasses = opts.focusClasses || ['person'];
@@ -695,9 +856,9 @@
         // Tracking-first mode: locked targets rely more on prediction
         // 追踪优先模式：锁定目标更依赖预测
         this._associateAndUpdateTrackingFirst(locked, enriched, unmatchedDetIdx, lockedTargetDetectionWeight);
-        // Normal tracks still use detection-based association
-        // 普通轨迹仍使用检测为主的关联
-        this._associateAndUpdate(normal, enriched, unmatchedDetIdx, false);
+        // Then associate normal tracks using Hungarian algorithm
+        // 然后使用匈牙利算法关联普通轨迹
+        this._associateAndUpdateHungarian(normal, enriched, unmatchedDetIdx, false);
       } else {
         // Standard mode: detection-first association
         // 标准模式：检测优先关联
@@ -817,6 +978,198 @@
           // No good detection match - rely purely on tracking
           // 没有好的检测匹配 - 纯依赖追踪
           track._updatedThisRound = true;
+        }
+      }
+    }
+
+    /**
+     * Hungarian algorithm-based association for optimal assignment
+     * 基于匈牙利算法的关联，实现最优分配
+     */
+    _associateAndUpdateHungarian(trackList, detections, unmatchedDetIdx, isLockedPass) {
+      if (trackList.length === 0 || unmatchedDetIdx.size === 0) return;
+
+      // Build cost matrix
+      // 构建成本矩阵
+      const detectionArray = Array.from(unmatchedDetIdx).map(idx => detections[idx]);
+      const detectionIndices = Array.from(unmatchedDetIdx);
+      
+      if (detectionArray.length === 0) return;
+      
+      const costMatrix = [];
+      const maxCost = 10.0;
+      
+      for (let ti = 0; ti < trackList.length; ti++) {
+        const t = trackList[ti];
+        const tb = t.bbox;
+        const row = [];
+        
+        // Adaptive gating
+        // 自适应门控
+        const velocityMagnitude = Math.sqrt((t.vx || 0) ** 2 + (t.vy || 0) ** 2);
+        const velocityFactor = Math.min(3.0, 1.0 + velocityMagnitude / 50);
+        let gating = Math.max(this.gatingBase, 0.5 * Math.hypot(t.w, t.h)) * velocityFactor;
+        
+        if (t.occlusionState && t.occlusionState.isOccluded) {
+          gating = Math.max(gating, t.occlusionState.searchRadius || gating * 2.0);
+        }
+        
+        if (t.locked) {
+          gating *= 1.5;
+        }
+        
+        for (let di = 0; di < detectionArray.length; di++) {
+          const d = detectionArray[di];
+          const db = { x: d.x, y: d.y, w: d.w, h: d.h };
+          const i = iou(tb, db);
+          const ctr = centerDistance(tb, db);
+          
+          // Gating check
+          // 门控检查
+          const gatingMultiplier = (t.occlusionState && t.occlusionState.isOccluded) ? 3.0 : 2.5;
+          const finalGatingMultiplier = t.locked ? gatingMultiplier * 1.2 : gatingMultiplier;
+          
+          if (i < 0.005 && ctr > gating * finalGatingMultiplier) {
+            row.push(maxCost);
+            continue;
+          }
+          
+          // Compute cost using existing logic
+          // 使用现有逻辑计算成本
+          let app = 1;
+          let idSwitchPenalty = 0;
+          
+          if (this.enableReID && d.feature) {
+            if (t.getAppearanceMatchScore && t.appearanceModel && t.appearanceModel.templates.length > 0) {
+              const matchScore = t.getAppearanceMatchScore(d.feature, d);
+              app = 1 - matchScore;
+              
+              if (matchScore < t.appearanceModel.discriminativeThreshold) {
+                let betterMatchExists = false;
+                for (const otherTrack of this.tracks) {
+                  if (otherTrack.id !== t.id && otherTrack.getAppearanceMatchScore) {
+                    const otherScore = otherTrack.getAppearanceMatchScore(d.feature, d);
+                    if (otherScore > matchScore + 0.15) {
+                      betterMatchExists = true;
+                      break;
+                    }
+                  }
+                }
+                
+                if (betterMatchExists) {
+                  idSwitchPenalty = t.idConsistency.switchPenalty;
+                }
+              }
+            } else if (t.feature) {
+              app = clamp(1 - cosineSimilarity(t.feature, d.feature), 0, 1);
+            } else {
+              t.feature = d.feature;
+              app = 0.3;
+            }
+          }
+          
+          const ratioT = (t.w / (t.h + 1e-3));
+          const ratioD = (d.w / (d.h + 1e-3));
+          const ratioDiff = Math.min(1, Math.abs(ratioT - ratioD) / Math.max(ratioT, ratioD));
+          const ctrNorm = clamp(ctr / (gating * 1.5), 0, 1);
+          
+          // Motion consistency
+          // 运动一致性
+          const dt = 1/30;
+          const predictedX = t.cx + (t.vx || 0) * dt + 0.5 * (t.motionModel?.acceleration?.ax || 0) * dt * dt;
+          const predictedY = t.cy + (t.vy || 0) * dt + 0.5 * (t.motionModel?.acceleration?.ay || 0) * dt * dt;
+          const detCenterX = d.x + d.w / 2;
+          const detCenterY = d.y + d.h / 2;
+          const motionDist = Math.sqrt((predictedX - detCenterX) ** 2 + (predictedY - detCenterY) ** 2);
+          
+          const velocityConfidence = Math.min(1.0, t.hits / 10);
+          const adaptiveMotionGating = gating * (0.5 + 0.5 * velocityConfidence);
+          const motionCost = clamp(motionDist / adaptiveMotionGating, 0, 1);
+          
+          // Adaptive weights
+          // 自适应权重
+          let wIoU = this.wIoU, wApp = this.wApp, wCtr = this.wCtr;
+          let wMotion = this.wMotion || 0.15;
+          
+          const trackAge = Math.min(1.0, t.hits / 30);
+          const stabilityFactor = Math.min(1.0, (t.hits - t.lostFrames) / Math.max(1, t.hits));
+          
+          if (isLockedPass) {
+            wIoU = Math.max(0.15, this.wIoU - 0.15);
+            wApp = Math.min(0.45, this.wApp + 0.15);
+            wCtr = Math.min(0.25, this.wCtr + 0.10);
+            wMotion = Math.min(0.20, this.wMotion + 0.10);
+          }
+          
+          if (t.occlusionState && t.occlusionState.isOccluded) {
+            wIoU *= 0.3;
+            wApp *= 1.5;
+            wCtr *= 1.3;
+            wMotion *= 1.4;
+          }
+          
+          if (stabilityFactor > 0.8) {
+            wMotion *= 1.2;
+          }
+          
+          // Trajectory consistency penalty
+          // 轨迹一致性惩罚
+          let trajConsistencyPenalty = 0;
+          if (t.trajectory.length >= 3) {
+            const recent = t.trajectory.slice(-3);
+            const avgVelX = (recent[2].x - recent[0].x) / 2;
+            const avgVelY = (recent[2].y - recent[0].y) / 2;
+            const expectedX = t.cx + avgVelX;
+            const expectedY = t.cy + avgVelY;
+            
+            const trajDeviation = Math.sqrt((expectedX - detCenterX)**2 + (expectedY - detCenterY)**2);
+            const maxReasonableDeviation = Math.max(50, Math.hypot(t.w, t.h) * 0.8);
+            if (trajDeviation > maxReasonableDeviation) {
+              trajConsistencyPenalty = Math.min(0.4, trajDeviation / maxReasonableDeviation * 0.2);
+            }
+          }
+          
+          // Size consistency penalty
+          // 尺寸一致性惩罚
+          const sizeChangeRatio = Math.max(d.w/t.w, t.w/d.w) * Math.max(d.h/t.h, t.h/d.h);
+          const sizeConsistencyPenalty = sizeChangeRatio > 2.0 ? Math.min(0.3, (sizeChangeRatio - 2.0) * 0.1) : 0;
+          
+          const baseCost = wIoU * (1 - i) + wApp * app + wCtr * ctrNorm + 
+                          (this.wRatio || 0.03) * ratioDiff + wMotion * motionCost;
+          
+          const cost = baseCost + idSwitchPenalty + trajConsistencyPenalty + sizeConsistencyPenalty;
+          
+          // Ensure cost is within reasonable bounds for Hungarian algorithm
+          // 确保成本在匈牙利算法的合理范围内
+          row.push(cost > this.costThreshold ? maxCost : cost);
+        }
+        
+        costMatrix.push(row);
+      }
+      
+      // Solve using Hungarian algorithm
+      // 使用匈牙利算法求解
+      const assignments = this.hungarian.solve(costMatrix);
+      
+      // Apply assignments
+      // 应用分配结果
+      for (let ti = 0; ti < assignments.length; ti++) {
+        const di = assignments[ti];
+        if (di >= 0 && di < detectionArray.length) {
+          const cost = costMatrix[ti][di];
+          if (cost <= this.costThreshold) {
+            const t = trackList[ti];
+            const d = detectionArray[di];
+            const originalDetIdx = detectionIndices[di];
+            
+            t.update({ x: d.x, y: d.y, w: d.w, h: d.h }, d.feature);
+            t._updatedThisRound = true;
+            unmatchedDetIdx.delete(originalDetIdx);
+            
+            if (isLockedPass) {
+              console.log(`Hungarian: Assigned locked track ${t.id} to detection (cost: ${cost.toFixed(3)})`);
+            }
+          }
         }
       }
     }
@@ -1186,15 +1539,24 @@
       }
     }
 
-    /** Remove stale tracks */
+    /** Remove stale tracks and release their IDs */
     _prune() {
       const beforeCount = this.tracks.length;
+      const prunedTracks = [];
+      
       this.tracks = this.tracks.filter(t => {
         const ttl = t.locked ? this.maxLostLocked : this.maxLostUnlocked;
         const shouldKeep = t.lostFrames <= ttl;
         
-        if (!shouldKeep && t.locked) {
-          console.log(`Pruning locked track ${t.id} after ${t.lostFrames} lost frames`);
+        if (!shouldKeep) {
+          prunedTracks.push(t);
+          // Release ID for future reuse
+          // 释放ID以供将来重用
+          this.idManager.releaseID(t.id);
+          
+          if (t.locked) {
+            console.log(`Pruning locked track ${t.id} after ${t.lostFrames} lost frames`);
+          }
         }
         
         return shouldKeep;
@@ -1230,7 +1592,9 @@
         }
       }
       
-      const id = this.nextId++;
+      // Use ID manager to allocate unique ID
+      // 使用ID管理器分配唯一ID
+      const id = this.idManager.allocateID();
       const t = new Track(id, { x: d.x, y: d.y, w: d.w, h: d.h }, { locked });
       if (feature) t.feature = feature;
       // Store object class information for display
@@ -1288,8 +1652,15 @@
       this.tracks[idx].locked = false; return true;
     }
 
-    /** Clear all tracks */
-    clear() { this.tracks = []; this.nextId = 1; }
+    /** Clear all tracks and reset ID manager */
+    clear() { 
+      // Release all track IDs
+      // 释放所有轨迹ID
+      for (const track of this.tracks) {
+        this.idManager.releaseID(track.id);
+      }
+      this.tracks = []; 
+    }
 
     /** Get shallow copy of tracks */
     getTracks() { return this.tracks.slice(); }
