@@ -175,8 +175,8 @@
       this.appearanceModel = {
         templates: [], // Multiple appearance templates
         weights: [],   // Template weights
-        maxTemplates: 3,
-        updateThreshold: 0.8
+        maxTemplates: 5,  // Increased template count
+        updateThreshold: 0.6  // Lowered threshold for more adaptive updates
       };
       
       this._pushTrajectory();
@@ -201,45 +201,72 @@
         this.motionModel.velocityHistory.shift();
       }
       
-      // Calculate acceleration from velocity history
-      // 从速度历史计算加速度
-      if (this.motionModel.velocityHistory.length >= 2) {
-        const recent = this.motionModel.velocityHistory.slice(-2);
-        const dt = (recent[1].t - recent[0].t) / 1000; // Convert to seconds
-        if (dt > 0) {
-          this.motionModel.acceleration.ax = (recent[1].vx - recent[0].vx) / dt;
-          this.motionModel.acceleration.ay = (recent[1].vy - recent[0].vy) / dt;
+      // Enhanced acceleration calculation with smoothing
+      // 增强的加速度计算，包含平滑处理
+      if (this.motionModel.velocityHistory.length >= 3) {
+        const recent = this.motionModel.velocityHistory.slice(-3);
+        let axSum = 0, aySum = 0, validSamples = 0;
+        
+        for (let i = 1; i < recent.length; i++) {
+          const dt = (recent[i].t - recent[i-1].t) / 1000;
+          if (dt > 0 && dt < 0.1) { // Valid time delta
+            axSum += (recent[i].vx - recent[i-1].vx) / dt;
+            aySum += (recent[i].vy - recent[i-1].vy) / dt;
+            validSamples++;
+          }
+        }
+        
+        if (validSamples > 0) {
+          // Smooth acceleration with exponential moving average
+          // 使用指数移动平均平滑加速度
+          const newAx = axSum / validSamples;
+          const newAy = aySum / validSamples;
+          const smoothingFactor = 0.3;
+          
+          this.motionModel.acceleration.ax = 
+            smoothingFactor * newAx + (1 - smoothingFactor) * this.motionModel.acceleration.ax;
+          this.motionModel.acceleration.ay = 
+            smoothingFactor * newAy + (1 - smoothingFactor) * this.motionModel.acceleration.ay;
         }
       }
       
-      // Enhanced prediction with acceleration
-      // 包含加速度的增强预测
+      // Enhanced prediction with acceleration and confidence weighting
+      // 包含加速度和置信度权重的增强预测
       const dt = 1/30; // Assume 30 FPS
-      let xp = this.cx + this.vx * dt + 0.5 * this.motionModel.acceleration.ax * dt * dt;
-      let yp = this.cy + this.vy * dt + 0.5 * this.motionModel.acceleration.ay * dt * dt;
+      const confidenceFactor = Math.min(1.0, this.hits / 15); // Build confidence over time
       
-      // Update velocity with acceleration
-      // 使用加速度更新速度
-      this.vx += this.motionModel.acceleration.ax * dt;
-      this.vy += this.motionModel.acceleration.ay * dt;
+      // Apply acceleration only if we have sufficient confidence
+      // 仅在有足够置信度时应用加速度
+      const accelWeight = confidenceFactor * 0.5;
+      let xp = this.cx + this.vx * dt + accelWeight * this.motionModel.acceleration.ax * dt * dt;
+      let yp = this.cy + this.vy * dt + accelWeight * this.motionModel.acceleration.ay * dt * dt;
       
-      // Apply damping to prevent runaway
-      // 应用阻尼防止失控
-      const dampingFactor = this.occlusionState.isOccluded ? 0.95 : 0.98;
+      // Update velocity with damped acceleration
+      // 使用阻尼加速度更新速度
+      const velocityDamping = this.locked ? 0.8 : 0.9; // More aggressive damping for locked tracks
+      this.vx = this.vx * velocityDamping + accelWeight * this.motionModel.acceleration.ax * dt;
+      this.vy = this.vy * velocityDamping + accelWeight * this.motionModel.acceleration.ay * dt;
+      
+      // Apply additional damping to prevent runaway
+      // 应用额外阻尼防止失控
+      const dampingFactor = this.occlusionState.isOccluded ? 0.92 : 0.96;
       this.vx *= dampingFactor;
       this.vy *= dampingFactor;
       
-      // Handle occlusion state
-      // 处理遮挡状态
+      // Handle occlusion state with improved prediction
+      // 使用改进预测处理遮挡状态
       if (this.occlusionState.isOccluded) {
-        // Expand search radius during occlusion
-        // 遮挡期间扩大搜索半径
-        this.occlusionState.searchRadius *= 1.05;
-        this.occlusionState.searchRadius = Math.min(this.occlusionState.searchRadius, 200);
+        // Adaptive search radius expansion
+        // 自适应搜索半径扩展
+        const expansionRate = Math.min(1.08, 1.02 + Math.sqrt(this.vx*this.vx + this.vy*this.vy) / 100);
+        this.occlusionState.searchRadius *= expansionRate;
+        this.occlusionState.searchRadius = Math.min(this.occlusionState.searchRadius, 250);
         
-        // Reduce confidence over time
-        // 随时间降低置信度
-        this.occlusionState.confidence *= 0.95;
+        // Confidence decay with velocity consideration
+        // 考虑速度的置信度衰减
+        const velocityMagnitude = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+        const decayRate = velocityMagnitude > 20 ? 0.93 : 0.95; // Faster decay for fast-moving objects
+        this.occlusionState.confidence *= decayRate;
         
         // Store predicted position
         // 存储预测位置
@@ -248,7 +275,10 @@
         // Update last known position when not occluded
         // 未遮挡时更新最后已知位置
         this.occlusionState.lastKnownPosition = { cx: this.cx, cy: this.cy };
-        this.occlusionState.confidence = Math.min(1.0, this.occlusionState.confidence + 0.1);
+        this.occlusionState.confidence = Math.min(1.0, this.occlusionState.confidence + 0.15);
+        // Reset search radius when not occluded
+        // 未遮挡时重置搜索半径
+        this.occlusionState.searchRadius = Math.max(this.w, this.h) * 0.6;
       }
       
       this.cx = xp;
@@ -342,14 +372,19 @@
       const bestTemplateIdx = similarities.indexOf(maxSimilarity);
       
       if (maxSimilarity > this.appearanceModel.updateThreshold) {
-        // Update existing template
-        // 更新现有模板
-        const mu = 0.2;
+        // Update existing template with adaptive learning rate
+        // 使用自适应学习率更新现有模板
+        const mu = Math.min(0.4, 0.1 + (1 - maxSimilarity) * 0.6); // Adaptive learning rate
         for (let i = 0; i < this.feature.length; i++) {
           this.appearanceModel.templates[bestTemplateIdx][i] = 
             (1 - mu) * this.appearanceModel.templates[bestTemplateIdx][i] + mu * newFeature[i];
         }
         l2normalize(this.appearanceModel.templates[bestTemplateIdx]);
+        
+        // Update weights based on similarity
+        // 基于相似度更新权重
+        this.appearanceModel.weights[bestTemplateIdx] = Math.min(1.0, 
+          this.appearanceModel.weights[bestTemplateIdx] + 0.1);
         
         // Update main feature to best template
         // 将主特征更新为最佳模板
@@ -379,23 +414,45 @@
       }
     }
     
-    /** Get best appearance match score with a feature */
+    /** Get best appearance match score with a feature using weighted ensemble */
     getAppearanceMatchScore(feature) {
       if (!feature || this.appearanceModel.templates.length === 0) return 0;
       
-      const similarities = this.appearanceModel.templates.map((template, idx) => 
-        cosineSimilarity(feature, template) * this.appearanceModel.weights[idx]
-      );
+      // Calculate weighted similarities
+      // 计算加权相似度
+      const weightedSimilarities = this.appearanceModel.templates.map((template, idx) => {
+        const similarity = cosineSimilarity(feature, template);
+        return similarity * this.appearanceModel.weights[idx];
+      });
       
-      return Math.max(...similarities);
+      // Use both max and weighted average for robustness
+      // 使用最大值和加权平均以提高鲁棒性
+      const maxSimilarity = Math.max(...weightedSimilarities);
+      const avgSimilarity = weightedSimilarities.reduce((sum, sim) => sum + sim, 0) / weightedSimilarities.length;
+      
+      // Combine max and average with preference for max
+      // 结合最大值和平均值，偏向最大值
+      return 0.7 * maxSimilarity + 0.3 * avgSimilarity;
     }
     
-    /** Check if track should enter occlusion state */
+    /** Check if track should enter occlusion state with improved logic */
     checkOcclusionState(frameCount) {
-      if (this.lostFrames > 3 && !this.occlusionState.isOccluded) {
+      // Different thresholds for locked vs unlocked tracks
+      // 锁定和未锁定轨迹的不同阈值
+      const occlusionThreshold = this.locked ? 2 : 4; // Locked tracks enter occlusion faster
+      
+      if (this.lostFrames > occlusionThreshold && !this.occlusionState.isOccluded) {
         this.occlusionState.isOccluded = true;
         this.occlusionState.occlusionStartFrame = frameCount;
-        this.occlusionState.searchRadius = Math.max(this.w, this.h) * 0.8;
+        
+        // Adaptive initial search radius based on velocity
+        // 基于速度的自适应初始搜索半径
+        const velocityMagnitude = Math.sqrt((this.vx || 0)**2 + (this.vy || 0)**2);
+        const baseRadius = Math.max(this.w, this.h) * 0.8;
+        const velocityBonus = Math.min(50, velocityMagnitude * 2); // Up to 50px bonus
+        this.occlusionState.searchRadius = baseRadius + velocityBonus;
+        
+        console.log(`Track ${this.id} entered occlusion state (lost: ${this.lostFrames}, locked: ${this.locked})`);
       }
     }
   }
@@ -416,13 +473,13 @@
       
       // Enhanced matching weights for better tracking
       // 增强的匹配权重以改善追踪效果
-      this.wIoU = opts.wIoU ?? 0.35;        // Reduced IoU weight
-      this.wApp = opts.wApp ?? 0.40;        // Appearance weight
-      this.wCtr = opts.wCtr ?? 0.15;        // Increased center distance weight
+      this.wIoU = opts.wIoU ?? 0.25;        // Further reduced IoU weight for fast movement
+      this.wApp = opts.wApp ?? 0.35;        // Appearance weight
+      this.wCtr = opts.wCtr ?? 0.20;        // Center distance weight
       this.wRatio = opts.wRatio ?? 0.05;    // Aspect ratio weight
-      this.wMotion = opts.wMotion ?? 0.05;  // New: motion consistency weight
+      this.wMotion = opts.wMotion ?? 0.15;  // Increased motion consistency weight
       
-      this.costThreshold = opts.costThreshold ?? 0.75; // Lowered for better matching
+      this.costThreshold = opts.costThreshold ?? 0.85; // Increased for more permissive matching
       this.autoCreate = !!opts.autoCreate; // default false: only create via click lock
       
       // Occlusion handling parameters
@@ -515,6 +572,10 @@
         delete t._updatedThisRound;
       }
 
+      // Try to recover lost tracks before creating new ones
+      // 在创建新轨迹前尝试恢复丢失的轨迹
+      this._attemptTrackRecovery(enriched, unmatchedDetIdx);
+
       // Optionally create new tracks from remaining detections (if enabled)
       if (this.autoCreate) {
         for (const idx of unmatchedDetIdx) {
@@ -535,10 +596,20 @@
         const t = trackList[ti];
         const tb = t.bbox;
         
-        // Adaptive gating for occlusion handling
-        let gating = Math.max(this.gatingBase, 0.5 * Math.hypot(t.w, t.h));
+        // Adaptive gating for occlusion handling with velocity consideration
+        // 考虑速度的自适应门控遮挡处理
+        const velocityMagnitude = Math.sqrt((t.vx || 0) ** 2 + (t.vy || 0) ** 2);
+        const velocityFactor = Math.min(3.0, 1.0 + velocityMagnitude / 50); // Scale with velocity
+        let gating = Math.max(this.gatingBase, 0.5 * Math.hypot(t.w, t.h)) * velocityFactor;
+        
         if (t.occlusionState && t.occlusionState.isOccluded) {
-          gating = Math.max(gating, t.occlusionState.searchRadius || gating * 1.5);
+          gating = Math.max(gating, t.occlusionState.searchRadius || gating * 2.0);
+        }
+        
+        // Special handling for locked tracks - more permissive gating
+        // 锁定轨迹的特殊处理 - 更宽松的门控
+        if (t.locked) {
+          gating *= 1.5;
         }
         
         for (const di of unmatchedDetIdx) {
@@ -547,8 +618,11 @@
           const i = iou(tb, db);
           const ctr = centerDistance(tb, db);
           
-          const gatingMultiplier = (t.occlusionState && t.occlusionState.isOccluded) ? 2.5 : 2.0;
-          if (i < 0.01 && ctr > gating * gatingMultiplier) continue;
+          const gatingMultiplier = (t.occlusionState && t.occlusionState.isOccluded) ? 3.0 : 2.5;
+          // More permissive gating for locked tracks
+          // 对锁定轨迹更宽松的门控
+          const finalGatingMultiplier = t.locked ? gatingMultiplier * 1.2 : gatingMultiplier;
+          if (i < 0.005 && ctr > gating * finalGatingMultiplier) continue; // Lowered IoU threshold
 
           // Enhanced appearance matching
           let app = 1;
@@ -568,26 +642,53 @@
           const ratioDiff = Math.min(1, Math.abs(ratioT - ratioD) / Math.max(ratioT, ratioD));
           const ctrNorm = clamp(ctr / (gating * 1.5), 0, 1);
           
-          // Motion consistency
-          const predictedX = t.cx + (t.vx || 0);
-          const predictedY = t.cy + (t.vy || 0);
+          // Enhanced motion consistency with acceleration
+          // 包含加速度的增强运动一致性
+          const dt = 1/30; // 30 FPS assumption
+          const predictedX = t.cx + (t.vx || 0) * dt + 0.5 * (t.motionModel?.acceleration?.ax || 0) * dt * dt;
+          const predictedY = t.cy + (t.vy || 0) * dt + 0.5 * (t.motionModel?.acceleration?.ay || 0) * dt * dt;
           const detCenterX = d.x + d.w / 2;
           const detCenterY = d.y + d.h / 2;
           const motionDist = Math.sqrt((predictedX - detCenterX) ** 2 + (predictedY - detCenterY) ** 2);
-          const motionCost = clamp(motionDist / gating, 0, 1);
+          
+          // Adaptive motion cost based on velocity confidence
+          // 基于速度置信度的自适应运动成本
+          const velocityConfidence = Math.min(1.0, t.hits / 10); // Build confidence over time
+          const adaptiveMotionGating = gating * (0.5 + 0.5 * velocityConfidence);
+          const motionCost = clamp(motionDist / adaptiveMotionGating, 0, 1);
 
-          // Adaptive weights
+          // Adaptive weights based on track state and confidence
+          // 基于轨迹状态和置信度的自适应权重
           let wIoU = this.wIoU, wApp = this.wApp, wCtr = this.wCtr;
-          const wMotion = this.wMotion || 0.05;
+          let wMotion = this.wMotion || 0.15;
+          
+          // Track age and stability factor
+          // 轨迹年龄和稳定性因子
+          const trackAge = Math.min(1.0, t.hits / 30); // Normalize to [0,1]
+          const stabilityFactor = Math.min(1.0, (t.hits - t.lostFrames) / Math.max(1, t.hits));
           
           if (isLockedPass) {
-            wIoU = Math.max(0.25, this.wIoU - 0.1);
-            wApp = Math.min(0.5, this.wApp + 0.1);
-            wCtr = Math.min(0.2, this.wCtr + 0.05);
+            // Locked tracks: prioritize appearance and motion over IoU
+            // 锁定轨迹：优先考虑外观和运动而非IoU
+            wIoU = Math.max(0.15, this.wIoU - 0.15);
+            wApp = Math.min(0.45, this.wApp + 0.15);
+            wCtr = Math.min(0.25, this.wCtr + 0.10);
+            wMotion = Math.min(0.20, this.wMotion + 0.10);
           }
           
+          // Occlusion state adjustments
+          // 遮挡状态调整
           if (t.occlusionState && t.occlusionState.isOccluded) {
-            wIoU *= 0.5; wApp *= 1.3; wCtr *= 1.2;
+            wIoU *= 0.3; // Heavily reduce IoU importance during occlusion
+            wApp *= 1.5; // Increase appearance importance
+            wCtr *= 1.3; // Increase center distance importance
+            wMotion *= 1.4; // Increase motion prediction importance
+          }
+          
+          // Stability-based adjustments
+          // 基于稳定性的调整
+          if (stabilityFactor > 0.8) {
+            wMotion *= 1.2; // Trust motion model more for stable tracks
           }
 
           const cost = wIoU * (1 - i) + wApp * app + wCtr * ctrNorm + 
@@ -604,8 +705,19 @@
         let threshold = this.costThreshold;
         const track = trackList[p.ti];
         
-        if (track.occlusionState && track.occlusionState.isOccluded) threshold *= 1.2;
-        if (track.locked) threshold *= 1.1;
+        // More permissive thresholds for different track states
+        // 针对不同轨迹状态的更宽松阈值
+        if (track.occlusionState && track.occlusionState.isOccluded) {
+          threshold *= 1.4; // More permissive during occlusion
+        }
+        if (track.locked) {
+          threshold *= 1.3; // More permissive for locked tracks
+        }
+        
+        // Track age adjustment - newer tracks get stricter thresholds
+        // 轨迹年龄调整 - 新轨迹使用更严格的阈值
+        const trackAge = Math.min(1.0, track.hits / 20);
+        threshold *= (0.9 + 0.2 * trackAge); // Scale from 0.9x to 1.1x based on age
         
         if (p.cost > threshold) break;
         if (usedT.has(p.ti) || !unmatchedDetIdx.has(p.di)) continue;
@@ -619,12 +731,132 @@
       }
     }
 
+    /** Attempt to recover lost tracks by matching with unmatched detections */
+    _attemptTrackRecovery(detections, unmatchedDetIdx) {
+      // Find tracks that are lost but not yet pruned
+      // 找到丢失但尚未被清除的轨迹
+      const lostTracks = this.tracks.filter(t => 
+        t.lostFrames > 5 && t.lostFrames < (t.locked ? this.maxLostLocked : this.maxLostUnlocked)
+      );
+      
+      if (lostTracks.length === 0 || unmatchedDetIdx.size === 0) return;
+      
+      const recoveryPairs = [];
+      
+      for (const track of lostTracks) {
+        // Use predicted position for recovery matching
+        // 使用预测位置进行恢复匹配
+        const predictedPos = track.occlusionState.predictedPosition || 
+                           { cx: track.cx, cy: track.cy };
+        
+        for (const detIdx of unmatchedDetIdx) {
+          const det = detections[detIdx];
+          const detCx = det.x + det.w / 2;
+          const detCy = det.y + det.h / 2;
+          
+          // Distance-based recovery check
+          // 基于距离的恢复检查
+          const distance = Math.sqrt((predictedPos.cx - detCx)**2 + (predictedPos.cy - detCy)**2);
+          const maxRecoveryDistance = track.locked ? 150 : 100;
+          
+          if (distance > maxRecoveryDistance) continue;
+          
+          // Class consistency check
+          // 类别一致性检查
+          if (track.class && det.class && track.class !== det.class) continue;
+          
+          // Appearance similarity check (if available)
+          // 外观相似性检查（如果可用）
+          let appearanceScore = 0.5; // Default neutral score
+          if (det.feature && track.getAppearanceMatchScore) {
+            appearanceScore = track.getAppearanceMatchScore(det.feature);
+          }
+          
+          // Size consistency check
+          // 尺寸一致性检查
+          const sizeRatio = Math.min(det.w/track.w, track.w/det.w) * 
+                           Math.min(det.h/track.h, track.h/det.h);
+          
+          // Combined recovery score
+          // 综合恢复分数
+          const distanceScore = Math.exp(-distance / 50); // Exponential decay
+          const recoveryScore = 0.4 * distanceScore + 0.4 * appearanceScore + 0.2 * sizeRatio;
+          
+          // Higher threshold for locked tracks (more permissive)
+          // 锁定轨迹的更高阈值（更宽松）
+          const recoveryThreshold = track.locked ? 0.4 : 0.6;
+          
+          if (recoveryScore > recoveryThreshold) {
+            recoveryPairs.push({
+              track: track,
+              detIdx: detIdx,
+              detection: det,
+              score: recoveryScore,
+              distance: distance
+            });
+          }
+        }
+      }
+      
+      // Sort by recovery score (best first)
+      // 按恢复分数排序（最佳优先）
+      recoveryPairs.sort((a, b) => b.score - a.score);
+      
+      // Apply recovery matches
+      // 应用恢复匹配
+      const usedDetections = new Set();
+      const recoveredTracks = new Set();
+      
+      for (const pair of recoveryPairs) {
+        if (usedDetections.has(pair.detIdx) || recoveredTracks.has(pair.track.id)) {
+          continue;
+        }
+        
+        // Recover the track
+        // 恢复轨迹
+        const track = pair.track;
+        const det = pair.detection;
+        
+        console.log(`Recovering track ${track.id} after ${track.lostFrames} lost frames (score: ${pair.score.toFixed(3)})`);
+        
+        // Update track with detection
+        // 使用检测结果更新轨迹
+        track.update({ x: det.x, y: det.y, w: det.w, h: det.h }, det.feature);
+        track._updatedThisRound = true;
+        
+        // Reset occlusion state
+        // 重置遮挡状态
+        if (track.occlusionState.isOccluded) {
+          track.occlusionState.isOccluded = false;
+          track.occlusionState.confidence = Math.min(1.0, track.occlusionState.confidence + 0.3);
+        }
+        
+        // Mark as used
+        // 标记为已使用
+        usedDetections.add(pair.detIdx);
+        recoveredTracks.add(track.id);
+        unmatchedDetIdx.delete(pair.detIdx);
+      }
+    }
+
     /** Remove stale tracks */
     _prune() {
+      const beforeCount = this.tracks.length;
       this.tracks = this.tracks.filter(t => {
         const ttl = t.locked ? this.maxLostLocked : this.maxLostUnlocked;
-        return t.lostFrames <= ttl;
+        const shouldKeep = t.lostFrames <= ttl;
+        
+        if (!shouldKeep && t.locked) {
+          console.log(`Pruning locked track ${t.id} after ${t.lostFrames} lost frames`);
+        }
+        
+        return shouldKeep;
       });
+      
+      const prunedCount = beforeCount - this.tracks.length;
+      if (prunedCount > 0) {
+        console.log(`Pruned ${prunedCount} stale tracks`);
+      }
     }
 
     /** Create track from detection */
