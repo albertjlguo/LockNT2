@@ -369,9 +369,9 @@
       // 检查是否从遮挡中恢复
       const wasOccluded = this.occlusionState.isOccluded;
       
-      // prediction step
-      const xp = this.cx + this.vx;
-      const yp = this.cy + this.vy;
+      // The prediction is already done in predict(). cx/cy are the predicted state.
+      const xp = this.cx;
+      const yp = this.cy;
       
       // Calculate innovation (measurement residual)
       // 计算新息（测量残差）
