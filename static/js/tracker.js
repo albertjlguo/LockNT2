@@ -755,19 +755,19 @@
       this.maxLostUnlocked = opts.maxLostUnlocked ?? 30; // Reduced for efficiency
       this.maxLostLocked = opts.maxLostLocked ?? 120; // Increased for occlusion tolerance
       
-      // Enhanced matching weights for better tracking
-      // 增强的匹配权重以改善追踪效果
-      this.wIoU = opts.wIoU ?? 0.25;        // Further reduced IoU weight for fast movement
-      this.wApp = opts.wApp ?? 0.35;        // Appearance weight
-      this.wCtr = opts.wCtr ?? 0.20;        // Center distance weight
-      this.wRatio = opts.wRatio ?? 0.05;    // Aspect ratio weight
-      this.wMotion = opts.wMotion ?? 0.15;  // Increased motion consistency weight
+      // Enhanced matching weights for better tracking (tuned to reduce ID switches)
+      // 增强的匹配权重以减少ID切换
+      this.wIoU = opts.wIoU ?? 0.20;        // Slightly lower IoU weight
+      this.wApp = opts.wApp ?? 0.40;        // Higher appearance weight / 更高外观权重
+      this.wCtr = opts.wCtr ?? 0.22;        // Slightly higher center distance weight / 略高中心距离权重
+      this.wRatio = opts.wRatio ?? 0.05;    // Aspect ratio weight / 宽高比权重
+      this.wMotion = opts.wMotion ?? 0.18;  // Higher motion consistency weight / 更高运动一致性权重
       
-      // Adaptive cost thresholds for different scenarios
-      // 针对不同场景的自适应成本阈值
-      this.costThreshold = opts.costThreshold ?? 0.75; // Reduced base threshold for stricter matching
-      this.crowdedSceneThreshold = opts.crowdedSceneThreshold ?? 0.65; // Even stricter for crowded scenes
-      this.lockedTrackThreshold = opts.lockedTrackThreshold ?? 0.85; // More permissive for locked tracks
+      // Adaptive cost thresholds for different scenarios (stricter defaults)
+      // 针对不同场景的自适应成本阈值（更严格的默认值）
+      this.costThreshold = opts.costThreshold ?? 0.70; // Base threshold / 基础阈值
+      this.crowdedSceneThreshold = opts.crowdedSceneThreshold ?? 0.60; // Crowded scenes / 密集场景
+      this.lockedTrackThreshold = opts.lockedTrackThreshold ?? 0.88; // Locked tracks acceptance / 锁定轨迹匹配阈值
       this.autoCreate = !!opts.autoCreate;
       
       // Occlusion handling parameters
@@ -949,7 +949,40 @@
           // Weighted update: blend prediction with detection
           // 加权更新：混合预测和检测
           const det = bestMatch.detection;
-          const predWeight = 1.0 - detectionWeight;
+
+          // Stricter override conditions for blending when locked tracking-first
+          // 更严格的融合条件（锁定 + 追踪优先）
+          let appSimTF = 0;
+          if (this.enableReID && det.feature) {
+            if (track.getAppearanceMatchScore && track.appearanceModel?.templates?.length > 0) {
+              appSimTF = track.getAppearanceMatchScore(det.feature, det);
+            } else if (track.feature) {
+              appSimTF = cosineSimilarity(track.feature, det.feature);
+            }
+          }
+
+          const iouTF = iou(track.bbox, { x: det.x, y: det.y, w: det.w, h: det.h });
+          const minAppToBlend = (track.hits - track.lostFrames) / Math.max(1, track.hits) > 0.75 ? 0.60 : 0.55;
+          const minIoUToBlend = 0.15;
+
+          // For very stable low-velocity tracks, skip blending unless very strong evidence
+          // 对非常稳定且低速的轨迹，除非证据很强，否则跳过融合
+          const velMag = Math.hypot(track.vx || 0, track.vy || 0);
+          const veryStable = ((track.hits - track.lostFrames) / Math.max(1, track.hits)) > 0.9 && velMag < 3;
+          if (veryStable && (appSimTF < 0.7 || centerDistance(track.bbox, { x: det.x, y: det.y, w: det.w, h: det.h }) > 30)) {
+            track._updatedThisRound = true; // rely on prediction only
+            continue;
+          }
+
+          if (appSimTF < minAppToBlend || iouTF < minIoUToBlend) {
+            track._updatedThisRound = true; // insufficient evidence to blend
+            continue;
+          }
+
+          // Adaptive prediction weight: give more weight to prediction for stable tracks
+          // 自适应预测权重：轨迹越稳定，对预测的权重越大
+          const stabilityTF = Math.min(1.0, (track.hits - track.lostFrames) / Math.max(1, track.hits));
+          const predWeight = stabilityTF > 0.75 ? 0.8 : (1.0 - detectionWeight);
           
           // Blend predicted and detected positions
           // 混合预测和检测位置
@@ -1138,8 +1171,57 @@
           const baseCost = wIoU * (1 - i) + wApp * app + wCtr * ctrNorm + 
                           (this.wRatio || 0.03) * ratioDiff + wMotion * motionCost;
           
-          const cost = baseCost + idSwitchPenalty + trajConsistencyPenalty + sizeConsistencyPenalty;
-          
+          let cost = baseCost + idSwitchPenalty + trajConsistencyPenalty + sizeConsistencyPenalty;
+
+          // ---------------- Hard appearance/discrimination gate ----------------
+          // ---------------- 强外观/区分度门控 ----------------
+          if (this.enableReID && d.feature && trackList[ti]) {
+            let appSim = 0;
+            let discrRatio = 0;
+            if (t.appearanceModel?.templates?.length > 0) {
+              // Recompute top-2 weighted similarities to estimate discrimination
+              // 重新计算前两名加权相似度以估计区分度
+              const sims = t.appearanceModel.templates.map((tpl, idx) => ({
+                sim: cosineSimilarity(d.feature, tpl) * (t.appearanceModel.weights[idx] || 0),
+              }));
+              sims.sort((a, b) => b.sim - a.sim);
+              const s0 = sims[0]?.sim || 0;
+              const s1 = sims[1]?.sim || 0;
+              appSim = s0; // use top weighted sim as similarity proxy / 使用最高加权相似度作为代理
+              discrRatio = s0 > 0 ? (s0 - s1) / (s0 + 1e-6) : 0;
+            } else if (t.feature) {
+              appSim = cosineSimilarity(t.feature, d.feature);
+              discrRatio = 0; // no template set to estimate discrimination / 无法估计区分度
+            }
+
+            const minApp = isLockedPass ? 0.55 : 0.45;
+            const minDiscr = isLockedPass ? 0.15 : 0.10;
+            if (appSim < minApp || discrRatio < minDiscr) {
+              cost = maxCost; // reject weak/ambiguous appearance matches
+            }
+          }
+
+          // ---------------- Spatial competition penalty ----------------
+          // ---------------- 空间竞争惩罚 ----------------
+          if (cost < maxCost) {
+            const thisCtr = { x: tb.x + tb.w / 2, y: tb.y + tb.h / 2 };
+            const detCtr = { x: d.x + d.w / 2, y: d.y + d.h / 2 };
+            const distThis = Math.hypot(thisCtr.x - detCtr.x, thisCtr.y - detCtr.y);
+            let minOtherDist = Infinity;
+            for (const other of this.tracks) {
+              if (other.id === t.id) continue;
+              const ob = other.bbox;
+              const oCtr = { x: ob.x + ob.w / 2, y: ob.y + ob.h / 2 };
+              const dO = Math.hypot(oCtr.x - detCtr.x, oCtr.y - detCtr.y);
+              if (dO < minOtherDist) minOtherDist = dO;
+            }
+            // If detection is much closer to another track, penalize to avoid cross-overs
+            // 如果检测更接近其他轨迹很多，施加惩罚以避免交叉匹配
+            if (minOtherDist + 15 < distThis) {
+              cost += 1.0; // add margin penalty / 添加惩罚
+            }
+          }
+
           // Ensure cost is within reasonable bounds for Hungarian algorithm
           // 确保成本在匈牙利算法的合理范围内
           row.push(cost > this.costThreshold ? maxCost : cost);
@@ -1163,6 +1245,21 @@
             const d = detectionArray[di];
             const originalDetIdx = detectionIndices[di];
             
+            // Additional strict acceptance for locked tracks
+            // 锁定轨迹的更严格接受条件
+            if (isLockedPass) {
+              // Recompute best and second-best costs for this track's row
+              // 重新计算该轨迹行的最优与次优成本
+              const row = costMatrix[ti];
+              const validCosts = row.filter(v => v < maxCost).sort((a, b) => a - b);
+              const best = validCosts[0];
+              const second = validCosts[1];
+              const marginOk = (second === undefined) ? true : (best + 0.05 < second);
+              if (cost > this.lockedTrackThreshold || !marginOk) {
+                continue; // reject ambiguous or high-cost assignment / 拒绝含糊或高成本分配
+              }
+            }
+
             t.update({ x: d.x, y: d.y, w: d.w, h: d.h }, d.feature);
             t._updatedThisRound = true;
             unmatchedDetIdx.delete(originalDetIdx);
