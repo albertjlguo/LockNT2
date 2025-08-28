@@ -629,7 +629,7 @@
     /** Update appearance model with EMA */
     updateAppearanceModel(newFeature) {
       const alpha = 0.2; // EMA smoothing factor
-      if (this.feature && this.feature.color && this.feature.geometric) {
+      if (newFeature && newFeature.color && newFeature.geometric && this.feature && this.feature.color && this.feature.geometric) {
         // EMA update for color histogram
         for (let i = 0; i < this.feature.color.length; i++) {
           this.feature.color[i] = (1 - alpha) * this.feature.color[i] + alpha * newFeature.color[i];
