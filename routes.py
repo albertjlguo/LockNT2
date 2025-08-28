@@ -7,6 +7,14 @@ import threading
 import time
 from urllib.parse import urlparse
 
+# Minimal 1x1 black JPEG for heartbeat fallback when no frame exists yet
+# 极简1x1黑色JPEG占位图：在首帧尚未产生时用于心跳包，防止超时
+SMALL_JPEG = (
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    b"\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\x09\x09\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c !,'\x1f\x1c\x1c(7),01444\x1f'9=82<.342\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x01\x03\x11\x01"
+    b"\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\xd2\xcf\xff\xd9"
+)
+
 # Global stream processor instance
 stream_processor = None
 processing_thread = None
@@ -125,8 +133,8 @@ def video_feed_mjpeg():
         last_send_ts = time.time()
         last_frame_send_ts = 0.0  # Control max MJPEG send rate
         last_progress_ts = time.time()  # Track progress to detect stalls
-        stall_timeout = 4.0  # seconds without new frames triggers reconnect
-        heartbeat_interval = 2.0  # seconds; send a keepalive chunk to prevent worker timeout
+        stall_timeout = 6.0  # seconds without new frames triggers reconnect / 超过6秒无新帧则断开重连（降低误判）
+        heartbeat_interval = 0.2  # seconds; frequent keepalives to prevent worker timeout / 更频繁心跳
         min_frame_interval = 1.0 / 15.0  # Pace to ~15 FPS
         last_sent_frame = None  # Cache last successfully sent JPEG for heartbeat
         # 说明：缓存上一帧，在无新帧或latest为空时用于心跳保活，避免Gunicorn超时
@@ -155,11 +163,29 @@ def video_feed_mjpeg():
                     
                     # Enhanced MJPEG headers with performance optimizations
                     # 增强的MJPEG头部，包含性能优化
-                    # Pace output to ~15 FPS
+                    # Pace output to ~15 FPS without long blocking sleeps (avoids Gunicorn timeout)
+                    # 以非阻塞方式限速到约15FPS，避免长时间sleep触发Gunicorn超时
                     now_send = time.time()
                     if last_frame_send_ts and (now_send - last_frame_send_ts) < min_frame_interval:
-                        # sleep the remaining time
-                        time.sleep(max(0.0, min_frame_interval - (now_send - last_frame_send_ts)))
+                        # Not yet time to send next frame. Push heartbeat if due; otherwise brief yieldless wait.
+                        # 发送时机未到：若到心跳周期则发送心跳，否则短暂等待
+                        if now_send - last_send_ts >= heartbeat_interval:
+                            last_send_ts = now_send
+                            hb = frame or last_sent_frame or (stream_processor.get_latest_frame() if stream_processor else None) or SMALL_JPEG
+                            if hb:
+                                ts_hb = str(int(now_send * 1000))
+                                yield (b"--" + boundary.encode() + b"\r\n"
+                                       b"Content-Type: image/jpeg\r\n"
+                                       b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                                       b"Pragma: no-cache\r\n"
+                                       b"Expires: 0\r\n"
+                                       b"X-Timestamp: " + ts_hb.encode() + b"\r\n"
+                                       b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
+                                       b"Content-Length: " + str(len(hb)).encode() + b"\r\n\r\n" + hb + b"\r\n")
+                        # Very short sleep to avoid busy loop, but not long enough to risk timeout
+                        # 极短休眠避免空转，不至于引发超时
+                        time.sleep(0.005)
+                        continue
                     last_frame_send_ts = time.time()
                     timestamp = str(int(last_frame_send_ts * 1000))
                     yield (b"--" + boundary.encode() + b"\r\n"
@@ -190,7 +216,7 @@ def video_feed_mjpeg():
                         if stream_processor:
                             heartbeat_frame = stream_processor.get_latest_frame()
                         if not heartbeat_frame:
-                            heartbeat_frame = last_sent_frame
+                            heartbeat_frame = last_sent_frame or SMALL_JPEG
                         if heartbeat_frame:
                             ts_hb = str(int(time.time() * 1000))
                             yield (b"--" + boundary.encode() + b"\r\n"
@@ -201,19 +227,22 @@ def video_feed_mjpeg():
                                    b"X-Timestamp: " + ts_hb.encode() + b"\r\n"
                                    b"X-Frame-ID: " + str(current_frame_id).encode() + b"\r\n"
                                    b"Content-Length: " + str(len(heartbeat_frame)).encode() + b"\r\n\r\n" + heartbeat_frame + b"\r\n")
-                        # If no frame at all, fall through to brief sleep to avoid busy loop
-                        # 若完全无帧可发，则短暂休眠以避免空转
+                        else:
+                            # No frame at all (rare). Yield minimal wait and try again very soon.
+                            # 完全无帧（少见）：极短休眠后立即重试
+                            time.sleep(0.005)
                     else:
-                        # Brief sleep to avoid busy loop but keep it short to not risk timeout
-                        # 短暂休眠避免空转，但保持很短以降低超时风险
-                        time.sleep(0.02)
+                        # Always keep loop responsive; very short sleep avoids busy-loop yet yields often
+                        # 保持循环高响应：极短休眠避免空转，并频繁机会发心跳
+                        time.sleep(0.005)
                     
             except GeneratorExit:
                 break
             except Exception as e:
                 logging.error(f"Error in enhanced MJPEG generator: {e}")
-                # Brief pause to avoid tight loop
-                time.sleep(0.02)
+                # Brief pause to avoid tight loop (micro-sleep to ensure worker never blocks long)
+                # 极短休眠以避免空转，同时保证worker不长时间阻塞
+                time.sleep(0.005)
 
     return Response(generate(), 
                     mimetype='multipart/x-mixed-replace; boundary=frame',
