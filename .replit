@@ -1,12 +1,13 @@
-modules = ["python-3.11"]
+modules = ["nodejs-20", "web", "python-3.11"]
+run = "gunicorn --bind 0.0.0.0:5000 --reuse-port --reload main:app"
 
 [nix]
 channel = "stable-25_05"
-packages = ["libGL", "libGLU", "openssl", "postgresql", "lsof", "file", "uv"]
+packages = ["file", "libGL", "libGLU", "lsof", "openssl", "postgresql", "uv"]
 
 [deployment]
 deploymentTarget = "autoscale"
-run = ["gunicorn", "--bind", "0.0.0.0:5000", "main:app"]
+run = ["sh", "-c", "gunicorn --bind 0.0.0.0:5000 --reuse-port --reload main:app"]
 
 [workflows]
 runButton = "Project"
